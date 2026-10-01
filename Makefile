@@ -10,6 +10,7 @@
 #   make solvers-check  eq.c smoke run + every solver script against its documented numbers (~25 s)
 #   make eq169-check    rebuild solvers/eq169.bin at 20k trials/pair and compare bytes (~50 s)
 #   make cpp-test       exhaustive 7/6/5-card evaluator test, CodinGame and native flags (~1 min incl. build)
+#   make engine-check   C++ engine vs poker_sim.py: 3,000 random-action games + all 381 replays (~1 min)
 #   make all            all of the above except eq169-check
 #   make full           all + eq169-check
 #   make clean          remove build outputs and data/cache/ (never touches committed data)
@@ -19,9 +20,9 @@ JOBS ?= 8
 CACHE := data/cache
 
 .PHONY: all full submodule replayer validate validate-sim validate-java reconstruct cache preeq-check \
-        solvers-check eq169-check cpp-test clean
+        solvers-check eq169-check cpp-test engine-check clean
 
-all: replayer validate reconstruct cache preeq-check solvers-check cpp-test
+all: replayer validate reconstruct cache preeq-check solvers-check cpp-test engine-check
 full: all eq169-check
 
 submodule:
@@ -55,6 +56,9 @@ solvers-check:
 	$(PYTHON) solvers/check.py
 eq169-check:
 	$(PYTHON) solvers/check.py --full
+
+engine-check:
+	$(PYTHON) engine/check.py all --games 3000 --seed 7
 
 cpp-test:
 	$(MAKE) -C cpp test
