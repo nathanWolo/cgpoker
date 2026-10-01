@@ -54,6 +54,7 @@ sets), one valued out of sample understates it, so both are reported; the truth 
 | 20 | +0.037 | 0.014 / 0.039 |
 | 30 | +0.071 | 0.017 / 0.056 |
 | 60 (400M iterations) | +0.117 | 0.006 / 0.068 |
+| 120 (400M iterations) | +0.125 | 0.036 / 0.108 |
 
 For reference, the SB's value when restricted to jam or fold (`pf.py`) is −0.045 BB/hand at 10 BB,
 −0.08 at 12 BB, −0.13 at 15 BB and −0.18 at 20 BB: the unrestricted game is worth 0.05-0.2 BB/hand
