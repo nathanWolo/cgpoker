@@ -15,6 +15,7 @@
 #include "../cpp/eval7_slow.hpp"
 #include "../cpp/icm.hpp"
 #include "pfn_tables.hpp"
+#include "hu_play.hpp"
 #include "../cpp/pe7c.hpp"
 #include "../engine/tracker.hpp"
 #include "pf_rank.hpp"
@@ -33,6 +34,7 @@ struct Rng {                                           // splitmix64
     return z ^ (z >> 31);
   }
   __attribute__((always_inline)) inline int below(int n) { return (int)((next() >> 32) * (uint64_t)n >> 32); }
+  double uni() { return (next() >> 11) * (1.0 / 9007199254740992.0); }
 };
 
 struct Budget {
@@ -55,7 +57,7 @@ struct PfnGame {
   std::vector<unsigned char> rank, pos, thr;   // rank[node][169]; pos[node][class] = rank position; thr[node][P]
 };
 // 14 payload bits per CJK character (tools/cjk14.py); other characters are skipped
-inline int cjk14_decode(const char* s, unsigned char* out, int out_max) {
+int cjk14_decode(const char* s, unsigned char* out, int out_max) {
   int n = 0, bits = 0; unsigned acc = 0;
   for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
     if ((*p & 0xF0) != 0xE0) continue;
@@ -119,6 +121,7 @@ class Bot {
   long decisions = 0, trials_total = 0;
   bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
   double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
+  double hu_max_bb = 40;                  // heads-up: the solved 8-30 BB strategy (hu_play.hpp) up to this effective stack; above 30 the 30 BB tables
   double pfn_max_bb = 20;                 // 3-4 players, preflop: the ICM push/fold chart decides first-in, over limps and against a raise up to this stack (BB); 20 beat 12 in the arena
 
   // table-free value of the best 5 of k (5..7) cards
@@ -140,6 +143,61 @@ class Bot {
   }
 
   // Our share of the pot at showdown against n_opp uniformly random hands, given the known board.
+  // expected showdown equity against a random hand: runouts on the flop and turn, exact on the river (the
+  // heads-up strategy's card abstraction, solvers/hu)
+  double ehs(const int* hole, const int* board, int n_board, int runouts = 300) {
+    uint64_t used = 1ull << hole[0] | 1ull << hole[1]; for (int i = 0; i < n_board; i++) used |= 1ull << board[i];
+    int deck[52], nd = 0; for (int c = 0; c < 52; c++) if (!(used >> c & 1)) deck[nd++] = c;
+    int c7[7]; c7[0] = hole[0]; c7[1] = hole[1]; for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
+    double s = 0; int n = 0;
+    if (n_board == 5) {
+      uint32_t mine = ev7(c7);
+      for (int i = 0; i < nd; i++) for (int j = i + 1; j < nd; j++) { int o7[7] = {deck[i], deck[j], board[0], board[1], board[2], board[3], board[4]}; uint32_t ov = ev7(o7); s += mine > ov ? 1 : mine == ov ? 0.5 : 0; n++; }
+      return s / n;
+    }
+    int need = 5 - n_board + 2;
+    for (int r = 0; r < runouts; r++) {
+      for (int i = 0; i < need; i++) { int j = i + rng.below(nd - i); std::swap(deck[i], deck[j]); }
+      for (int i = 0; i < 5 - n_board; i++) c7[2 + n_board + i] = deck[i];
+      uint32_t mine = ev7(c7);
+      int o7[7]; o7[0] = deck[5 - n_board]; o7[1] = deck[6 - n_board]; for (int i = 0; i < 5; i++) o7[2 + i] = c7[2 + i];
+      uint32_t ov = ev7(o7);
+      s += mine > ov ? 1 : mine == ov ? 0.5 : 0; n++;
+    }
+    return s / n;
+  }
+  // the hand so far as the heads-up abstraction's history (hu_play.hpp); ok = false if it cannot be mapped
+  std::string hu_history(bool& ok) const {
+    std::string h; int street = 0; ok = true; int tot[4] = {0, 0, 0, 0};
+    for (const auto& e : tr.hand_log) {
+      if (e.hand != tr.hand_nb) continue;
+      int st = e.street == 0 ? 0 : e.street - 2;
+      while (street < st) { h += '/'; street++; }
+      const pk::Player& p = tr.players[e.pid];
+      int start = p.stack + p.total, mine = e.pid == tr.me ? 0 : 1, other = 1 - mine;   // indices in tot[]: 0 = me, 1 = them
+      char c = 0;
+      switch (e.type) {
+        case pk::A_FOLD: c = 'F'; break;
+        case pk::A_CHECK: c = 'K'; break;
+        case pk::A_CALL: c = 'C'; break;
+        case pk::A_ALL_IN: c = e.total_after <= tot[other] ? 'C' : 'A'; break;         // an all-in that only calls is a call
+        case pk::A_BET: {
+          if (e.allin) { c = e.total_after <= tot[other] ? 'C' : 'A'; break; }
+          if (st == 0) { c = e.total_after >= 0.6 * start ? 'A' : 'R'; break; }
+          size_t sl = h.rfind('/'); std::string cur = sl == std::string::npos ? h : h.substr(sl + 1);
+          bool facing = !cur.empty() && (cur.back() == 'B' || cur.back() == 'A');
+          c = facing ? 'A' : (e.added >= 0.6 * (e.stack_after + e.added) ? 'A' : 'B');
+          break;
+        }
+        default: ok = false; return h;
+      }
+      tot[mine] = e.total_after;
+      h += c;
+    }
+    int st_now = tr.board.empty() ? 0 : (int)tr.board.size() - 2;
+    while (street < st_now) { h += '/'; street++; }
+    return h;
+  }
   double equity(const int* hole, const int* board, int n_board, int n_opp, const Budget& b, Clock::time_point t0) {
     int used[7], nu = 0;
     used[nu++] = hole[0]; used[nu++] = hole[1];
@@ -331,6 +389,31 @@ class Bot {
       if (tr.me == tr.bb_id && opp && opp->allin && call > 0) {
         last_tag = "pf-bb"; last_equity = -1; last_trials = 0;
         return (pf::PF_CALL[cls] >> k & 1) ? call_s() : "FOLD";
+      }
+    }
+
+    // ---- heads-up at 8-40 BB effective: the solved strategy (hu_play.hpp); off-tree histories fall through
+    if (hu_max_bb > 0 && alive == 2 && live == 2) {
+      int opp_start = 0; for (auto& p : tr.players) if (p.id != tr.me && p.stack + p.total > 0) opp_start = p.stack + p.total;
+      double eff_start = (double)std::min(my_start, opp_start) / bb;
+      if (eff_start >= hu_t::STACKS[0] - 1e-9 && eff_start <= hu_max_bb) {
+        bool ok; std::string h = hu_history(ok);
+        if (ok) {
+          int st = n_board == 0 ? 0 : n_board - 2;
+          int bucket = st == 0 ? cls : hu_bucket(st, ehs(hole, board, n_board));
+          const HuNode* nd = nullptr;
+          char a = hu_decide(std::min(eff_start, hu_t::STACKS[hu_t::NS - 1]), h, bucket, rng.uni(), &nd);
+          if (a) {
+            last_tag = std::string("hu-") + a; last_equity = -1; last_trials = 0;
+            int opp_rnd = 0; for (auto& p : tr.players) if (p.id != tr.me) opp_rnd = std::max(opp_rnd, p.rnd);
+            if (a == 'F') return can_check ? "CHECK" : "FOLD";
+            if (a == 'K') return can_check ? "CHECK" : call_s();
+            if (a == 'C') return call_s();
+            if (a == 'A') return can_allin ? "ALL-IN" : bet(stack);
+            if (a == 'R') { int target = h.empty() ? (int)(2.5 * bb) : h == "C" ? 3 * bb : 3 * opp_rnd; return bet(target - me.rnd); }
+            return bet(pot / 2);                                                   // 'B': half the pot
+          }
+        }
       }
     }
 

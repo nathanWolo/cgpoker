@@ -227,6 +227,19 @@ fact 4). Jam/fold's value there is only a lower bound (fact 6).
 - SPRT on HU tables (games that start HU, and 3-4p games once they reach HU) against M1, with
   non-inferiority on 3-4p tables.
 
+**M2 status (2026-10-01, overnight): built, first version.** `solvers/hu/`
+([README](../solvers/hu/README.md)): the abstract game above with one postflop bet size (half pot)
+besides all-in, 169 classes preflop and 10 EHS buckets per postflop street, chance as a 2M-deal pool,
+external-sampling MCCFR; 528 nodes / 3,810 information sets at 10 BB. 150M iterations per stack
+point take 3 minutes for all seven in parallel. Exploitability at 10 BB after 100M iterations is
+between 0.006 (out-of-sample best response) and 0.022 (in-sample) BB/hand. Q-D1: the SB's value is
++0.008 BB/hand at 10 BB, +0.025 at 15 and +0.034 at 20 against −0.045 / −0.13 / −0.18 restricted
+to jam/fold. Shipped as 4-bit probabilities for every node (24k characters; the bot rebuilds the
+tree from the rules and checks a hash). Not yet done from the list above: the postflop policy net
+(not needed, the tables fit), pseudo-harmonic action translation (a fixed 60%-of-stack rule maps
+raises to all-in), the river re-solve, and local best response in the real game. Arena, paired
+against M1: @@ARENA_M2@@.
+
 ### M3: 3-4-player deep play (≈2 weeks)
 
 1. **Preflop charts** for N = 3, 4 by position × facing action × stack bucket (15-150 BB), for this

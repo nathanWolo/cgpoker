@@ -125,7 +125,7 @@ def main():
         for line in open(os.path.join(errdir, f"g{seed}.err")):
             parts = line.split()
             for p in parts:
-                if p in ("pf-sb", "pf-bb", "pfn-jam", "pfn-jam-lim", "pfn-call", "pfn-rejam", "icm", "open", "complete", "raise", "call", "callff", "bet", "check"):
+                if p in ("pf-sb", "pf-bb", "pfn-jam", "pfn-jam-lim", "pfn-call", "pfn-rejam", "icm", "open", "complete", "raise", "call", "callff", "bet", "check") or p.startswith("hu-"):
                     tags[p] += 1
         ok = rc == 0 and not none and len(me.decisions) > 0
         fails += not ok

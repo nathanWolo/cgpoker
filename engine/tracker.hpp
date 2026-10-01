@@ -118,15 +118,28 @@ class Tracker : public Board {
     return true;
   }
 
+  // This hand's actions in order, for strategy lookups: who did what on which street (board size), the
+  // chips it added, the actor's whole-hand commitment and stack afterwards, and whether it left them all-in.
+  struct HandAct { int hand, street, pid, type, added, total_after, stack_after; bool allin; };
+  std::vector<HandAct> hand_log;
+
   // Apply a shown (post-replacement) action from an action line to next_player.
   bool apply_shown(const std::string& a) {
-    if (a == "FOLD") do_action(A_FOLD, 0);
-    else if (a == "CHECK") do_action(A_CHECK, 0);
-    else if (a == "CALL") do_action(A_CALL, 0);
-    else if (a == "ALL-IN") do_action(A_ALL_IN, 0);
-    else if (a == "TIMEOUT") do_action(A_TIMEOUT, 0);
-    else if (a.rfind("BET_", 0) == 0) do_action(A_BET, atoi(a.c_str() + 4));
+    int pid = next_player, street = board.size(), before = pid >= 0 ? players[pid].total : 0;
+    ActType t; int amt = 0;
+    if (a == "FOLD") t = A_FOLD;
+    else if (a == "CHECK") t = A_CHECK;
+    else if (a == "CALL") t = A_CALL;
+    else if (a == "ALL-IN") t = A_ALL_IN;
+    else if (a == "TIMEOUT") t = A_TIMEOUT;
+    else if (a.rfind("BET_", 0) == 0) { t = A_BET; amt = atoi(a.c_str() + 4); }
     else return fail("unknown action " + a);
+    do_action(t, amt);
+    if (pid >= 0) {
+      if (!hand_log.empty() && hand_log.back().hand != hand_nb) hand_log.clear();
+      const Player& p = players[pid];
+      hand_log.push_back({hand_nb, street, pid, (int)t, p.total - before, p.total, p.stack, p.allin});
+    }
     return true;
   }
 

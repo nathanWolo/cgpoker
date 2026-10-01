@@ -1,4 +1,4 @@
-# How the bot works, end to end (M1, 2026-10-01)
+# How the bot works, end to end (M2, 2026-10-01)
 
 One turn, from stdin to stdout, with the parts that make it work. File references are to this
 repository; the numbers are the ones measured in [`bot/README.md`](../bot/README.md),
@@ -93,11 +93,15 @@ The range sampler draws each opponent's hand from the range, rejecting card conf
 
 In order:
 
-1. **Heads-up, preflop, ≤ 12 BB effective: push/fold Nash.** The small blind jams or folds, the
-   big blind calls a jam or folds, by `bot/pf_tables.hpp`: 169 hands × 13 stack depths, solved
-   offline by fictitious play (`solvers/pf.py`, exported by `solvers/export_pf.py`) and stored as
-   bits, about 0.2k characters. 12 BB was tuned in the arena; at 25 BB it cost against calling
-   stations.
+1. **Heads-up at 8-40 BB effective: the solved game.** Preflop and every postflop street come from
+   one MCCFR solution of an abstract heads-up game (`solvers/hu/`, [README](../solvers/hu/README.md)):
+   fold / limp / raise / all-in preflop, check / half-pot bet / all-in postflop, 169 preflop classes
+   and 10 buckets per postflop street by expected showdown equity, solved at 7 stack points and
+   interpolated. The tracker logs every action of the hand; `bot/hu_play.hpp` maps them onto the
+   tree's history, computes our bucket (300 runouts, exact on the river), and *samples* the action
+   from the node's probabilities, so the strategy is mixed as an equilibrium is. A history the tree
+   lacks (a 4-bet) falls through to the rules below. Below 8 BB the heads-up jam/fold Nash of
+   `bot/pf_tables.hpp` still applies (the small blind jams or folds, the big blind calls or folds).
 2. **3-4 players, preflop: the ICM push/fold chart.** Facing a jam, always (unless it is small next
    to our stack with players still to act, where pot odds apply); first in, over limpers and against
    a raise when our stack is ≤ 20 BB. A limp counts as a fold and a raise as a jam, since the chart's
@@ -154,13 +158,14 @@ shoves. The arena's paired test caught it before it went live.
 
 ## 9. What it does not do yet
 
-- No solved postflop strategy: the postflop rules are heuristics around equity-vs-range. M2
-  replaces them with a CFR-solved heads-up game at 8-30 BB, which is where most games are decided.
+- Postflop with 3-4 players, and heads-up above 40 BB, is still heuristics around equity-vs-range.
+  The heads-up solution's abstraction is coarse: one bet size besides all-in, no non-all-in raises
+  postflop, equity buckets that do not tell a draw from a made hand of the same equity.
 - Multiway, the big-call ICM rule approximates side pots; the push/fold chart settles them exactly
   but models everyone as jam-or-fold, so a short stack facing a min-raise gets the heuristics.
 - The flop/turn range ranking ignores draws.
-- No mixing: the rules are deterministic given the cards, which a strong opponent could exploit.
-  Equilibrium strategies mix.
+- Outside the heads-up solution the rules are deterministic given the cards, which a strong
+  opponent could exploit. Equilibrium strategies mix.
 
 ## 10. How it is verified
 

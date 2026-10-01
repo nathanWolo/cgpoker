@@ -2,6 +2,7 @@
 // the HU jam/fold tables against solvers/pf.py's widths.  Exit 1 on failure.
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include "bot.hpp"
 
 static int fails = 0;
@@ -74,6 +75,37 @@ int main() {
     check("pfn interpolation", (t12 >= std::min(t10, t14) && t12 <= std::max(t10, t14)) ? 1 : 0, 1, 0);
     printf("     D first-in threshold classes: 10BB %.1f  12BB %.1f  14BB %.1f\n", t10, t12, t14);
   } else { printf("FAIL no 3p chart\n"); fails++; }
+  // the heads-up 8-30 BB strategy: tables decode; AA raises or jams first in, 72o mostly folds at 10 BB; history mapping
+  {
+    const bot::HuTables& T = bot::hu_tables();
+    check("hu tables decode", T.ok ? 1 : 0, 1, 0);
+    if (T.ok) {
+      auto freq = [&](double eff, const char* hist, int cls, const char* acts) {
+        double f = 0; for (int i = 0; i < 2000; i++) { char a = bot::hu_decide(eff, hist, cls, (i + 0.5) / 2000); if (a && strchr(acts, a)) f += 1.0 / 2000; } return f; };
+      int aa = 12 * 13 + 12, s72 = 0 * 13 + 5;   // 72o: lo*13+hi = 0*13+5
+      check("hu 10BB SB AA never folds", freq(10, "", aa, "F"), 0.0, 0.05);
+      check("hu 10BB SB 72o folds", freq(10, "", s72, "F"), 1.0, 0.1);
+      check("hu 10BB BB AA calls a jam", freq(10, "A", aa, "C"), 1.0, 0.05);
+      check("hu 10BB BB 72o folds to a jam", freq(10, "A", s72, "F"), 1.0, 0.05);
+      check("hu 30BB SB AA does not fold", freq(30, "", aa, "F"), 0.0, 0.05);
+    }
+    bot::Bot b; static_cast<pk::Board&>(b.tr) = pk::Board(2, 1); b.tr.me = 0; b.tr.hand_nb = 7;
+    b.tr.players[0].stack = 1000; b.tr.players[1].stack = 1000;
+    auto act = [&](int pid, int type, int added, int total, int stack, bool allin, int street) { b.tr.hand_log.push_back({7, street, pid, type, added, total, stack, allin}); };
+    // SB limps, BB raises to 30 (bb 10), SB calls, flop: BB checks, SB bets 40, BB raises all-in
+    act(0, pk::A_CALL, 5, 10, 990, false, 0); act(1, pk::A_BET, 20, 30, 970, false, 0); act(0, pk::A_CALL, 20, 30, 970, false, 0);
+    b.tr.board = {0, 5, 9};
+    act(1, pk::A_CHECK, 0, 30, 970, false, 3); act(0, pk::A_BET, 40, 70, 930, false, 3); act(1, pk::A_BET, 970, 1000, 0, true, 3);
+    bool ok; std::string h = b.hu_history(ok);
+    check("hu history CRC/KBA", ok && h == "CRC/KBA" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+    b.tr.hand_log.clear(); b.tr.board.clear();
+    act(0, pk::A_ALL_IN, 995, 1000, 0, true, 0); act(1, pk::A_ALL_IN, 990, 1000, 0, true, 0);
+    h = b.hu_history(ok); check("hu history AC (an all-in call)", ok && h == "AC" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+    b.tr.hand_log.clear();
+    act(0, pk::A_BET, 20, 25, 975, false, 0); act(1, pk::A_BET, 65, 75, 925, false, 0); act(0, pk::A_CALL, 50, 75, 925, false, 0);
+    b.tr.board = {0, 5, 9};
+    h = b.hu_history(ok); check("hu history RRC/ then flop", ok && h == "RRC/" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+  }
   printf("%s (%d failures)\n", fails ? "FAIL" : "PASS", fails);
   return fails ? 1 : 0;
 }
