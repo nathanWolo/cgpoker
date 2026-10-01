@@ -4,7 +4,7 @@
 
 Per stack point and decision node (full action history, perfect recall) the average strategy over the
 node's buckets (169 preflop classes, NB EHS buckets postflop) is quantised to 4 bits per action
-probability (0..15 -> p = q / 15, renormalised at runtime) and packed, with the tree (histories,
+probability (a 16-level code, LEVELS, renormalised at runtime) and packed, with the tree (histories,
 actions, commitments) in a compact text table and the EHS bucket thresholds.  CJK14-packed.
 """
 import argparse, os, struct, sys
@@ -17,6 +17,10 @@ from cjk14 import encode_cjk14, decode_cjk14  # noqa: E402
 
 MAXA = 4
 ACT = ["F", "C", "R", "A", "K", "B"]
+# the 16 probability levels one nibble encodes (bot/hu_play.hpp HU_LEVELS): finer near 0 and 1 than q/15, so a rare
+# all-in bluff keeps its 1-3% instead of becoming 0 or 6.7%; the all-in frequency distortion over the preflop nodes
+# falls from 0.07 to 0.02 (summed |q-p| x combo weight)
+LEVELS = np.array([0, .01, .02, .035, .05, .075, .1, .15, .2, .3, .4, .5, .65, .8, .9, 1.0])
 
 
 def load_grid(path):
@@ -72,7 +76,7 @@ def main():
                 h = ((h ^ ch) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
             h = ((h ^ 0x2F) * 1099511628211) & 0xFFFFFFFFFFFFFFFF      # separator
             cnt += 1
-            q = np.clip(np.rint(n["probs"] * 15), 0, 15).astype(np.uint8)   # [nb][nact]
+            q = np.abs(n["probs"][..., None] - LEVELS).argmin(-1).astype(np.uint8)   # [nb][nact]: nearest code level
             # pack 4-bit values, two per byte, action-major within a bucket
             flat = q.reshape(-1)
             if len(flat) % 2:

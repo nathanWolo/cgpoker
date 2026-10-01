@@ -76,11 +76,12 @@ inline const HuTables& hu_tables() {
   }();
   return T;
 }
+const double HU_LEVELS[16] = {0, .01, .02, .035, .05, .075, .1, .15, .2, .3, .4, .5, .65, .8, .9, 1.0};   // export_hu.py LEVELS
 inline void hu_probs(const HuTables& t, const HuNode& n, int bucket, double* p) {
   double tot = 0;
   for (int a = 0; a < n.nact; a++) {
     int idx = bucket * n.nact + a; unsigned char b = t.data[n.off + idx / 2];
-    p[a] = (idx & 1 ? b & 15 : b >> 4) / 15.0; tot += p[a];
+    p[a] = HU_LEVELS[idx & 1 ? b & 15 : b >> 4]; tot += p[a];
   }
   if (tot <= 0) for (int a = 0; a < n.nact; a++) p[a] = 1.0 / n.nact; else for (int a = 0; a < n.nact; a++) p[a] /= tot;
 }

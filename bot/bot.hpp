@@ -170,12 +170,16 @@ class Bot {
   // the hand so far as the heads-up abstraction's history (hu_play.hpp); ok = false if it cannot be mapped
   std::string hu_history(bool& ok) const {
     std::string h; int street = 0; ok = true; int tot[4] = {0, 0, 0, 0};
+    // the effective stack at hand start (chips): a raise or bet is mapped to the nearer of the tree's two sizes in
+    // log terms (the geometric midpoint), the tree's raise (2.5 BB open, 3 BB over a limp, 3x a raise) or half-pot
+    // bet against all-in, where all-in means the EFFECTIVE stack: a 50 BB raise by a 400 BB stack is a shove for a
+    // 40 BB player.  (M2.1 compared the raise with the raiser's own stack and called such raises off as 2.5x opens.)
+    double eff = 1e18; for (auto& p : tr.players) if (p.stack + p.total > 0) eff = std::min(eff, (double)(p.stack + p.total));
     for (const auto& e : tr.hand_log) {
       if (e.hand != tr.hand_nb) continue;
       int st = e.street == 0 ? 0 : e.street - 2;
       while (street < st) { h += '/'; street++; }
-      const pk::Player& p = tr.players[e.pid];
-      int start = p.stack + p.total, mine = e.pid == tr.me ? 0 : 1, other = 1 - mine;   // indices in tot[]: 0 = me, 1 = them
+      int mine = e.pid == tr.me ? 0 : 1, other = 1 - mine;   // indices in tot[]: 0 = me, 1 = them
       char c = 0;
       switch (e.type) {
         case pk::A_FOLD: c = 'F'; break;
@@ -184,10 +188,16 @@ class Bot {
         case pk::A_ALL_IN: c = e.total_after <= tot[other] ? 'C' : 'A'; break;         // an all-in that only calls is a call
         case pk::A_BET: {
           if (e.allin) { c = e.total_after <= tot[other] ? 'C' : 'A'; break; }
-          if (st == 0) { c = e.total_after >= 0.6 * start ? 'A' : 'R'; break; }
           size_t sl = h.rfind('/'); std::string cur = sl == std::string::npos ? h : h.substr(sl + 1);
+          if (st == 0) {
+            double tree_r = cur.empty() ? 2.5 * tr.bb : cur == "C" ? 3.0 * tr.bb : 3.0 * tot[other];
+            c = e.total_after > std::sqrt(tree_r * eff) || e.total_after >= 0.6 * eff ? 'A' : 'R';
+            break;
+          }
           bool facing = !cur.empty() && (cur.back() == 'B' || cur.back() == 'A');
-          c = facing ? 'A' : (e.added >= 0.6 * (e.stack_after + e.added) ? 'A' : 'B');
+          double pot_before = tot[0] + tot[1];                                     // chips in the pot before this bet
+          double behind = eff - std::max(tot[0], tot[1]);                          // the effective stack left to bet
+          c = facing || e.added > std::sqrt(0.5 * pot_before * std::max(behind, 1.0)) || e.added >= 0.6 * behind ? 'A' : 'B';
           break;
         }
         default: ok = false; return h;

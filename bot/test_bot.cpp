@@ -105,6 +105,27 @@ int main() {
     act(0, pk::A_BET, 20, 25, 975, false, 0); act(1, pk::A_BET, 65, 75, 925, false, 0); act(0, pk::A_CALL, 50, 75, 925, false, 0);
     b.tr.board = {0, 5, 9};
     h = b.hu_history(ok); check("hu history RRC/ then flop", ok && h == "RRC/" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+    // size translation against the EFFECTIVE stack (the live M2.1 bug): a 50 BB raise by a 400 BB stack vs our 40 BB
+    b.tr.hand_log.clear(); b.tr.board.clear(); b.tr.players[0].stack = 390; b.tr.players[1].stack = 4000; b.tr.players[0].total = 10; b.tr.players[1].total = 5;
+    // we are the BB (seat 0, 400 chips at start); seat 1 (the SB, 4,405 chips) raises to 500 (bb 10)
+    act(1, pk::A_BET, 495, 500, 3905, false, 0);
+    h = b.hu_history(ok); check("hu: a 50 BB raise into a 40 BB stack is all-in", ok && h == "A" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+    b.tr.hand_log.clear(); act(1, pk::A_BET, 20, 25, 4380, false, 0);
+    h = b.hu_history(ok); check("hu: a 2.5x open is R", ok && h == "R" ? 1 : 0, 1, 0);
+    b.tr.hand_log.clear(); act(1, pk::A_BET, 105, 110, 4295, false, 0);
+    h = b.hu_history(ok); check("hu: an 11 BB open at 40 BB effective is all-in (the midpoint is sqrt(2.5x40)=10)", ok && h == "A" ? 1 : 0, 1, 0);
+    b.tr.hand_log.clear(); act(1, pk::A_BET, 85, 90, 4315, false, 0);
+    h = b.hu_history(ok); check("hu: a 9 BB open at 40 BB effective is R", ok && h == "R" ? 1 : 0, 1, 0);
+    // postflop, 21 BB effective (bb 40): pot 160 after a limped flop; the opponent bets 800 (5x pot) with 1,600 behind: all-in
+    b.tr.players[0].stack = 770; b.tr.players[1].stack = 3870; b.tr.players[0].total = 80; b.tr.players[1].total = 80; b.tr.bb = 40;
+    b.tr.hand_log.clear(); act(0, pk::A_CALL, 20, 40, 810, false, 0); act(1, pk::A_CHECK, 0, 40, 3910, false, 0);   // (bb 40: SB 20 completes, BB checks)
+    b.tr.board = {0, 5, 9};
+    act(1, pk::A_BET, 800, 880, 3110, false, 3);
+    h = b.hu_history(ok); check("hu: a 5x-pot overbet is all-in", ok && h == "CK/A" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+    b.tr.hand_log.clear(); act(0, pk::A_CALL, 20, 40, 810, false, 0); act(1, pk::A_CHECK, 0, 40, 3910, false, 0); act(1, pk::A_BET, 50, 130, 3860, false, 3);
+    h = b.hu_history(ok); check("hu: a third-pot bet is B", ok && h == "CK/B" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+    b.tr.hand_log.clear(); act(0, pk::A_CALL, 20, 40, 810, false, 0); act(1, pk::A_CHECK, 0, 40, 3910, false, 0); act(1, pk::A_BET, 160, 240, 3750, false, 3);
+    h = b.hu_history(ok); check("hu: a pot-sized bet with 20x pot behind is B", ok && h == "CK/B" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
   }
   printf("%s (%d failures)\n", fails ? "FAIL" : "PASS", fails);
   return fails ? 1 : 0;

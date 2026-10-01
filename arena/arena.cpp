@@ -83,6 +83,47 @@ struct RandomLegal : pk::Agent {             // uniform over the offered actions
     return true;
   }
 };
+// blind level from the observation (the referee doubles the blinds every hand_nb_by_level hands)
+static int bb_now(const pk::Obs& o) { int bb = o.big_blind; for (int h = 1; h + o.hand_nb_by_level <= o.hand_nb; h += o.hand_nb_by_level) bb *= o.level_mult; return bb; }
+static int pct_of(const pk::Obs& o) {       // strength percentile of our hole cards (0 = best), -1 if unknown
+  if (o.cards.size() != 5) return -1;
+  int c0 = pk::card_from(o.cards.c_str()), c1 = pk::card_from(o.cards.c_str() + 3);
+  return c0 < 0 || c1 < 0 ? -1 : pf::PF_PCT100[bot::hand_class(c0, c1)];
+}
+struct BigBet : pk::Agent {                  // raises big: opens to 8 BB with the top half, 3-bets 4x, overbets 1.5x pot postflop
+  Rng rng;
+  bool act(const pk::Obs& o, std::string& out) override {
+    bool preflop = o.board[0] == 'X', can_check = false, can_raise = false, can_allin = false;
+    for (auto& a : o.possible) { can_check |= a == "CHECK"; can_raise |= a.rfind("BET", 0) == 0; can_allin |= a == "ALL-IN"; }
+    int bb = bb_now(o), me = o.player_id, my = o.chip_in_pot[me], mx = 0, pot = 0, stack = o.stacks[me];
+    for (size_t i = 0; i < o.chip_in_pot.size(); i++) { mx = std::max(mx, o.chip_in_pot[i]); pot += o.chip_in_pot[i]; }
+    int call = mx - my, pct = pct_of(o);
+    if (preflop) {
+      if (mx <= bb) {                                               // unopened
+        if (pct >= 0 && pct <= 50 && can_raise) { out = "BET " + std::to_string(std::max(8 * bb - my, bb)); return true; }
+        out = can_check ? "CHECK" : (pct >= 0 && pct <= 75 ? "CALL" : "FOLD"); return true;
+      }
+      if (pct >= 0 && pct <= 8 && can_allin) { out = "ALL-IN"; return true; }
+      if (pct >= 0 && pct <= 20 && can_raise) { out = "BET " + std::to_string(4 * call); return true; }
+      out = pct >= 0 && pct <= 40 ? "CALL" : (can_check ? "CHECK" : "FOLD"); return true;
+    }
+    if (call == 0) {
+      if (rng.uni() < 0.45 && can_raise) { out = "BET " + std::to_string(std::max(3 * pot / 2, bb)); return true; }
+      out = can_check ? "CHECK" : "CALL"; return true;
+    }
+    out = rng.uni() < 0.5 ? "CALL" : "FOLD"; return true;
+  }
+};
+struct Limper : pk::Agent {                  // limps every hand, calls small bets, calls a shove with the top quarter
+  bool act(const pk::Obs& o, std::string& out) override {
+    bool can_check = false; for (auto& a : o.possible) can_check |= a == "CHECK";
+    int me = o.player_id, my = o.chip_in_pot[me], mx = 0; for (int c : o.chip_in_pot) mx = std::max(mx, c);
+    int call = mx - my, pct = pct_of(o);
+    if (can_check) { out = "CHECK"; return true; }
+    if (call >= o.stacks[me] / 2) { out = pct >= 0 && pct <= 25 ? "CALL" : "FOLD"; return true; }
+    out = "CALL"; return true;
+  }
+};
 struct Folder : pk::Agent {                  // checks when free, otherwise folds (a floor)
   bool act(const pk::Obs& o, std::string& out) override {
     bool can_check = false; for (auto& a : o.possible) can_check |= a == "CHECK";
@@ -117,6 +158,8 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
   if (name == "random") { auto* a = new RandomLegal(); a->rng = Rng{seed}; return a; }
   if (name == "maniac") return new Maniac();
   if (name == "folder") return new Folder();
+  if (name == "bigbet") { auto* a = new BigBet(); a->rng = Rng{seed}; return a; }
+  if (name == "limper") return new Limper();
   fprintf(stderr, "unknown agent %s\n", name.c_str()); exit(2);
 }
 
