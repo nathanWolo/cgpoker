@@ -1,5 +1,10 @@
 # Engineering budgets: what fits in 100k characters and 50 ms
 
+> Measured on CodinGame on 2026-10-01 (M0.1 probe): `__cplusplus=202002`; Monte Carlo 31M
+> trials/s, about half of this sandbox; turns 2-8 ms; evaluator start-up 2.3 s before the first
+> input (80 ms here), so the bot now builds its tables in a background thread. See
+> [`../../bot/README.md`](../../bot/README.md).
+
 These are the hard limits of a CodinGame Poker bot and what we have measured fits inside them: the
 platform limits, the character budget, table sizes, the hand evaluator, runtime primitives,
 per-turn budgets and offline training cost. Sources:

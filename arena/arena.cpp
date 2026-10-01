@@ -102,6 +102,7 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
     a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed;
     a->trace = getenv("ARENA_TRACE") != nullptr;
     if (getenv("BOT_JF")) a->b.jamfold_max_bb = atof(getenv("BOT_JF"));
+    if (getenv("BOT_SLOW")) a->b.use_fast = false;        // test the table-free evaluator path
     return a;
   }
   if (name == "prev") {

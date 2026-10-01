@@ -13,7 +13,7 @@ import argparse, os, re, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 INC = re.compile(r'^\s*#\s*include\s*"([^"]+)"\s*(?://.*)?$')
-CG_FLAGS = ["-std=gnu++17", "-Werror=return-type", "-g", "-pthread"]
+CG_FLAGS = ["-std=gnu++20", "-Werror=return-type", "-g", "-pthread"]   # CodinGame reports __cplusplus=202002
 CG_LIBS = ["-lm", "-lpthread", "-ldl", "-lcrypt"]
 
 

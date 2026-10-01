@@ -35,7 +35,8 @@ Status, 2026-10-01: all open.
   M0 skeleton. Set the deadlines from p99.9 with a margin, then re-check after every release.
 - *When:* M0, then every release.
 
-**Q-A3. Which C++ mode does CodinGame compile with?**
+**Q-A3. Which C++ mode does CodinGame compile with?** *Answered 2026-10-01: `__cplusplus=202002`
+(C++20); the local CodinGame-flag checks now use `-std=gnu++20`.*
 - *Why:* the help page (archived 2026-02) says g++ 11.2 "mode C++20". The owner's CI-verified line
   is `-std=gnu++17 -Werror=return-type -g -pthread` with no `-O`. Language features and the pragma
   placement depend on it.
@@ -43,7 +44,11 @@ Status, 2026-10-01: all open.
   gcc 11.2 docker gate as the local reference.
 - *When:* M0.
 
-**Q-A4. How fast is CodinGame's CPU compared with the research sandbox?**
+**Q-A4. How fast is CodinGame's CPU compared with the research sandbox?** *Partly answered
+2026-10-01: Monte Carlo 31M trials/s on CodinGame against 55-60M here (about half); turns took 2-8 ms
+(15 ms on the first). But the evaluator start-up took 2.3 s there against 80 ms here, before the
+first input arrived; the bot now builds its tables in a background thread and plays with a
+table-free evaluator until they are ready, so no turn waits on initialisation.*
 - *Why:* every µs figure (pe7c, `cpp/rvr.cpp`, `cpp/mlp.cpp`) was measured on a Xeon at 2.1 GHz with
   g++ 13.3, not 11.2. AVX2 is known to work on CodinGame, since the UTTT NNUE uses it.
 - *Resolve:* run a 20-50 ms benchmark on the first turn (evaluator evals/s, MC trials/s, MLP

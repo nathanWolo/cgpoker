@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <string>
 
+#include "../cpp/eval7_slow.hpp"
 #include "../cpp/pe7c.hpp"
 #include "../engine/tracker.hpp"
 #include "pf_rank.hpp"
@@ -54,7 +55,26 @@ class Bot {
   double last_equity = 0;
   std::string last_tag;
   long decisions = 0, trials_total = 0;
+  bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
   double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
+
+  // table-free value of the best 5 of k (5..7) cards
+  static uint32_t slow_partial(const int* c, int k) {
+    if (k == 7) return e7::ev7(c);
+    uint32_t best = 0; int five[5];
+    if (k == 5) return pk::eval5(c);
+    for (int skip = 0; skip < 6; skip++) {                 // k == 6
+      int q = 0; for (int i = 0; i < 6; i++) if (i != skip) five[q++] = c[i];
+      best = std::max(best, pk::eval5(five));
+    }
+    return best;
+  }
+  __attribute__((always_inline)) inline uint32_t ev7(const int* c) const {
+    if (!use_fast) return e7::ev7(c);
+    pe::H h = pe::E;
+    for (int i = 0; i < 7; i++) h = pe::add(h, c[i]);
+    return pe::ev(h);
+  }
 
   // Our share of the pot at showdown against n_opp uniformly random hands, given the known board.
   double equity(const int* hole, const int* board, int n_board, int n_opp, const Budget& b, Clock::time_point t0) {
@@ -67,23 +87,23 @@ class Bot {
       for (int i = 0; i < nu; i++) u |= used[i] == c;
       if (!u) deck[nd++] = c;
     }
-    pe::H base = pe::E;
-    for (int i = 0; i < n_board; i++) base = pe::add(base, board[i]);
-    pe::H mine = pe::add(pe::add(base, hole[0]), hole[1]);
     int need = 5 - n_board + 2 * n_opp;
+    int c7[7];
+    for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
     double share = 0;
     int trials = 0;
     for (;;) {
       for (int t = 0; t < 512; t++, trials++) {
         // partial Fisher-Yates for `need` cards
         for (int i = 0; i < need; i++) { int j = i + rng.below(nd - i); int tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp; }
-        pe::H bd = base, me = mine;
-        for (int i = 0; i < 5 - n_board; i++) bd = pe::add(bd, deck[i]), me = pe::add(me, deck[i]);
-        uint16_t mv = pe::ev(me);
+        for (int i = n_board; i < 5; i++) c7[2 + i] = deck[i - n_board];
+        c7[0] = hole[0]; c7[1] = hole[1];
+        uint32_t mv = ev7(c7);
         int better = 0, tie = 0;
         for (int o = 0; o < n_opp; o++) {
           int k = 5 - n_board + 2 * o;
-          uint16_t ov = pe::ev(pe::add(pe::add(bd, deck[k]), deck[k + 1]));
+          c7[0] = deck[k]; c7[1] = deck[k + 1];
+          uint32_t ov = ev7(c7);
           if (ov > mv) { better = 1; break; }
           tie += ov == mv;
         }
@@ -134,12 +154,18 @@ class Bot {
     for (int i = 0; i < n_board; i++) used[board[i]] = true;
     static thread_local int combo[1326][2]; static thread_local int key[1326]; static thread_local int idx[1326];
     int m = 0;
-    pe::H base = pe::E;
-    for (int i = 0; i < n_board; i++) base = pe::add(base, board[i]);
+    int c7[7]; for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
     for (int a = 0; a < 52; a++) if (!used[a])
       for (int c = a + 1; c < 52; c++) if (!used[c]) {
         combo[m][0] = a; combo[m][1] = c;
-        key[m] = n_board >= 3 ? (int)pe::ev(pe::add(pe::add(base, a), c)) : 100 - pf::PF_PCT100[hand_class(a, c)];
+        if (n_board >= 3) {                                // made-hand rank on the known board (5-7 cards)
+          c7[0] = a; c7[1] = c;
+          if (n_board == 5) key[m] = (int)ev7(c7);
+          else {                                           // flop/turn: rank by the best 5-of-(2+n_board) cards
+            pe::H h = pe::E; for (int i = 0; i < 2 + n_board; i++) h = pe::add(h, c7[i]);
+            key[m] = use_fast ? (int)pe::ev(h) : (int)slow_partial(c7, 2 + n_board);
+          }
+        } else key[m] = 100 - pf::PF_PCT100[hand_class(a, c)];
         idx[m] = m; m++;
       }
     std::sort(idx, idx + m, [&](int x, int y) { return key[x] > key[y]; });
@@ -154,9 +180,8 @@ class Bot {
     bool used[52] = {false};
     used[hole[0]] = used[hole[1]] = true;
     for (int i = 0; i < n_board; i++) used[board[i]] = true;
-    pe::H base = pe::E;
-    for (int i = 0; i < n_board; i++) base = pe::add(base, board[i]);
-    pe::H mine = pe::add(pe::add(base, hole[0]), hole[1]);
+    int c7[7];
+    for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
     double share = 0; int trials = 0;
     int oh[3][2];
     for (;;) {
@@ -182,12 +207,13 @@ class Bot {
         }
         int need = 5 - n_board;
         for (int i = 0; i < need; i++) { int j = i + rng.below(nd - i); int tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp; }
-        pe::H bd = base, me = mine;
-        for (int i = 0; i < need; i++) bd = pe::add(bd, deck[i]), me = pe::add(me, deck[i]);
-        uint16_t mv = pe::ev(me);
+        for (int i = n_board; i < 5; i++) c7[2 + i] = deck[i - n_board];
+        c7[0] = hole[0]; c7[1] = hole[1];
+        uint32_t mv = ev7(c7);
         int better = 0, tie = 0;
         for (int o = 0; o < n_opp; o++) {
-          uint16_t ov = pe::ev(pe::add(pe::add(bd, oh[o][0]), oh[o][1]));
+          c7[0] = oh[o][0]; c7[1] = oh[o][1];
+          uint32_t ov = ev7(c7);
           if (ov > mv) { better = 1; break; }
           tie += ov == mv;
         }

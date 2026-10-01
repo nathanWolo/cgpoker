@@ -16,7 +16,7 @@ CC := gcc
 PYTHON ?= python3
 # CodinGame compiles C++ with g++ 11.2 and exactly these flags (crossfish
 # documentation/minification.md section 13); it links -lm -lpthread -ldl -lcrypt.
-CG_FLAGS := -std=gnu++17 -Werror=return-type -g -pthread
+CG_FLAGS := -std=gnu++20 -Werror=return-type -g -pthread
 CG_LIBS := -lm -lpthread -ldl -lcrypt
 NATIVE_FLAGS := -std=gnu++17 -O3 -march=native -pthread
 # trials per class pair for pushfold's 169x169 Monte Carlo matrix (its default)
@@ -24,10 +24,10 @@ PUSHFOLD_TRIALS ?= 6000
 CROSSFISH ?= ../../crossfish
 
 BUILD := build
-HDRS := pe7c.hpp pe7.hpp
+HDRS := pe7c.hpp pe7.hpp eval7_slow.hpp
 # test_eval, bench (pe7c), rvr, mlp, pushfold, ex use pe7c.hpp; bench_ref/bench_direct/prof use
 # pe7.hpp.  prof.cpp has no optimize pragma, so it is built natively only.
-PROGS := test_eval bench bench_ref bench_direct ex rvr mlp pushfold
+PROGS := test_eval test_eval7_slow bench bench_ref bench_direct ex rvr mlp pushfold
 CG_BINS := $(addprefix $(BUILD)/cg/,$(PROGS))
 NATIVE_BINS := $(addprefix $(BUILD)/native/,$(PROGS) prof)
 
@@ -54,9 +54,11 @@ $(BUILD)/cg/bench_direct: bench.cpp $(HDRS) | $(BUILD)/cg
 $(BUILD)/native/bench_direct: bench.cpp $(HDRS) | $(BUILD)/native
 	$(CXX) $(NATIVE_FLAGS) -DPE_REF -DPE_DIRECT -o $@ $<
 
-test: $(BUILD)/cg/test_eval $(BUILD)/native/test_eval
+test: $(BUILD)/cg/test_eval $(BUILD)/native/test_eval $(BUILD)/cg/test_eval7_slow $(BUILD)/native/test_eval7_slow
 	@echo "== test_eval, CodinGame flags"; $(BUILD)/cg/test_eval
 	@echo "== test_eval, native flags"; $(BUILD)/native/test_eval
+	@echo "== test_eval7_slow vs pe7c and the engine, CodinGame flags"; $(BUILD)/cg/test_eval7_slow 100000
+	@echo "== test_eval7_slow, native flags"; $(BUILD)/native/test_eval7_slow 300000
 
 # one flag set at a time; each program runs alone so timings do not interfere
 define RUN_ALL
