@@ -1,4 +1,17 @@
-# tools/: replay download and game-id lists
+# tools/: submission bundling, replay download and game-id lists
+
+## bundle.py and cg_minify.py
+
+```sh
+python3 tools/bundle.py --minify      # = make bot
+```
+
+`bundle.py` inlines `bot/main.cpp`'s repository-local includes into one file, `build/cg/poker_bundled.cpp`,
+compiles it with CodinGame's flags, and with `--minify` runs `cg_minify.py` on it to produce
+`build/cg/poker_min.cpp`, the file to paste into CodinGame (27k characters for the M0 bot). `cg_minify.py`
+is crossfish's minifier (identifier renaming, whitespace packing) plus `--keep NAMES` for identifiers
+it must not rename, which `bundle.py` uses for nested `std::chrono` names. See [`bot/README.md`](../bot/README.md).
+
 
 ## fetch_replays.py
 

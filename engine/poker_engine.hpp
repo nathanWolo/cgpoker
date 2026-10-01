@@ -514,6 +514,8 @@ class Engine : public Board {
   std::vector<int> last_sent_round, last_sent_hand;
   int last_hand_round = 0;
   std::vector<LogEntry> log;
+  std::vector<int> replaced;                         // per seat: outputs the referee replaced (illegal or unparseable)
+  std::vector<std::string> replaced_log;             // the first few, "seat: raw -> shown" (debugging)
 
   Engine(int n_, int64_t seed) : rng(seed) {
     if (n_ < 2 || n_ > 4) throw std::invalid_argument("n must be 2..4");
@@ -523,6 +525,7 @@ class Engine : public Board {
     showdowns.resize(1);
     last_sent_round.assign(n, 0);
     last_sent_hand.assign(n, 0);
+    replaced.assign(n, 0);
     // Referee.init
     reset_hand(); init_deck(); init_blind(); calculate_next_player();
   }
@@ -612,6 +615,10 @@ class Engine : public Board {
     if (!ok) pr = {A_TIMEOUT, 0, true};
     else pr = parse(out.substr(0, out.find(';')));
     auto rp = replace(pr.t, pr.amount);
+    if (ok && (pr.err || rp.first != pr.t || (rp.first == A_BET && rp.second != pr.amount))) {
+      replaced[pid]++;
+      if (replaced_log.size() < 50) replaced_log.push_back(std::to_string(pid) + ": " + out + " -> " + act_name(rp.first) + (rp.first == A_BET ? "_" + std::to_string(rp.second) : ""));
+    }
     std::string shown = act_name(rp.first);
     if (rp.first == A_BET) shown += "_" + std::to_string(rp.second);
     round_infos[turn] = {turn, hand_nb, pid, shown, board_str()};

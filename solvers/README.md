@@ -24,6 +24,12 @@ build/eq 200 build/eq_quick.bin    # 0.5 s smoke test
 
 The arguments are `[trials_per_pair=20000] [out=eq169.bin]`. Sanity lines at 20k trials: AA vs KK 0.821, AKo vs 22 0.473, AA vs 72o 0.880, QJs vs 22 0.522. The "ref" values the program prints next to these are its own rough hard-coded references.
 
+## export_pf.py
+
+`python3 solvers/export_pf.py` (= `make pf-tables`, ~20 s) runs `pf.py`'s fictitious play at 13 stack
+points (2-25 BB) and writes `bot/pf_tables.hpp`: per hand class, one bit per stack point for "SB jams"
+and "BB calls a jam". The bot uses them heads-up at ≤ 8 BB effective.
+
 ## Scripts
 
 | script | runtime | observed output |

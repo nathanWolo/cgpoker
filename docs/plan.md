@@ -91,6 +91,14 @@ Durations are estimates.
 
 ### M0: engine, harness and baseline (≈1-1.5 weeks)
 
+**Status 2026-10-01: built.** `engine/` (381/381 replays; 3,000 fuzz games identical to
+`sim/poker_sim.py` decision for decision, including the 600 cap and NONE rounds), the tracker (0
+mismatches over 633k fuzz and 74k real decisions), `bot/` (bundled 60.9k chars, minified 27.4k;
+0 replaced actions in 1,000 arena games), `arena/` (paired dev-vs-prev difference exactly 0 for
+identical bots). Not yet done: the equity-table payload (deferred to M1, where it is first needed),
+the ICM call-off thresholds (M1), the live probe submission and the gcc 11.2 docker gate, which
+need the owner's CodinGame account and crossfish's `tools/cg_gate`.
+
 1. **C++ engine.** Port `sim/poker_sim.py` with every quirk ([`sim/README.md`](../sim/README.md)).
    - Gate 1: a differential fuzz of 1e6 random-action hands against `poker_sim.py`, covering side
      pots, the odd chip, action replacement, the raise cap, NONE rounds, the 600-cap refund and the

@@ -11,6 +11,10 @@
 #   make eq169-check    rebuild solvers/eq169.bin at 20k trials/pair and compare bytes (~50 s)
 #   make cpp-test       exhaustive 7/6/5-card evaluator test, CodinGame and native flags (~1 min incl. build)
 #   make engine-check   C++ engine vs poker_sim.py: 3,000 random-action games + all 381 replays (~1 min)
+#   make bot            bundle bot/main.cpp -> build/cg/poker_bundled.cpp + poker_min.cpp (the submission), CodinGame flags
+#   make arena          build/arena/arena (dev + frozen prev + scripted opponents), then a 200-game smoke run
+#   make pf-tables      regenerate bot/pf_tables.hpp from solvers/pf.py (~20 s)
+#   make freeze         bot/bot_prev.hpp := bot/bot.hpp (arena/freeze.py)
 #   make all            all of the above except eq169-check
 #   make full           all + eq169-check
 #   make clean          remove build outputs and data/cache/ (never touches committed data)
@@ -20,9 +24,9 @@ JOBS ?= 8
 CACHE := data/cache
 
 .PHONY: all full submodule replayer validate validate-sim validate-java reconstruct cache preeq-check \
-        solvers-check eq169-check cpp-test engine-check clean
+        solvers-check eq169-check cpp-test engine-check bot arena pf-tables freeze clean
 
-all: replayer validate reconstruct cache preeq-check solvers-check cpp-test engine-check
+all: replayer validate reconstruct cache preeq-check solvers-check cpp-test engine-check bot arena
 full: all eq169-check
 
 submodule:
@@ -59,6 +63,20 @@ eq169-check:
 
 engine-check:
 	$(PYTHON) engine/check.py all --games 3000 --seed 7
+
+bot:
+	$(PYTHON) tools/bundle.py --minify
+
+arena:
+	@mkdir -p build/arena
+	g++ -std=gnu++17 -O3 -march=native -pthread -o build/arena/arena arena/arena.cpp
+	build/arena/arena --games 200 --threads 4 --trials 5000 --opp station,jammer,random,folder
+
+pf-tables:
+	$(PYTHON) solvers/export_pf.py
+
+freeze:
+	$(PYTHON) arena/freeze.py
 
 cpp-test:
 	$(MAKE) -C cpp test
