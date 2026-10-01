@@ -33,11 +33,12 @@ Where the scratch files referenced in the raw output now live:
 |---|---|
 | `poker_research/poker_sim.py`, `validate_replays.py`, `reconstruct.py` | `sim/` (plus `sim/replay_io.py`) |
 | `poker_research/{elim_depth,hand_outcomes,replay_stats,stack_depth}.py`, `stack_depth_table.txt` | `analysis/` |
-| `analyze.py`, `stats.py`, `stats2.py`, `stats3.py`, `steal_se.py`, `preeq.tsv` | `analysis/` |
+| `analyze.py`, `stats2.py`, `steal_se.py`, `preeq.tsv` | `analysis/` |
+| `stats.py`, `stats3.py` | `archive/profiling/` (moved 2026-10-01) |
 | `replayer/`, `replay_game.py` | `replayer/` (the referee classes now come from the submodule) |
 | `poker_research/evals/` (`pe7*.hpp`, `bench*.cpp`, `rvr.cpp`, `mlp.cpp`, `pushfold.cpp`, `cmp.cpp`, `train_cost.py`, ...) | `cpp/` (`pe7c_fixed.hpp` is now `pe7c.hpp`; see `cpp/README.md`, History) |
 | `pf/` (`eq.c`, `eq169.bin`, `pf.py`, `exploit.py`, `icm2.py`, `mmdstep2.py`), `mmd_ab.py` | `solvers/` (`icm.py` and `mmdstep.py` removed as superseded/broken) |
-| `exploit/oppmodel2.py` | `oppmodel/` (`oppmodel.py` and `steal.py` removed as superseded) |
+| `exploit/oppmodel2.py` | `archive/profiling/oppmodel/` (moved 2026-10-01; `oppmodel.py` and `steal.py` removed as superseded) |
 | `staged/dup.py`, `staged/dup4.py` | `eval/` |
 | `fetch_replays.sh`, `poker_research/fetch_replays.py` | `tools/fetch_replays.py` (rewritten: throttled, resumable) |
 | `replays/`, `poker_research/replays/`, `battles/` | `data/replays/<gameId>.json.gz`, `data/battles/<nick>.json.gz` |

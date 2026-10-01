@@ -1,4 +1,4 @@
-"""Repo-relative paths and replay loading shared by analysis/, oppmodel/ and eval/ scripts (runs from any cwd)."""
+"""Repo-relative paths and replay loading shared by analysis/, eval/ and archive/profiling/ scripts (runs from any cwd)."""
 import glob, gzip, json, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -9,10 +9,10 @@ CACHE = os.path.join(DATA, "cache")                         # regenerated artifa
 SNAPSHOT = os.path.join(DATA, "snapshots", "2026-09-30")
 LEADERBOARD = os.path.join(SNAPSHOT, "cg_lb.json")
 REPLAYED_PKL = os.path.join(CACHE, "replayed.pkl")          # written by analyze.py
-STATS_PKL = os.path.join(CACHE, "stats.pkl")                # written by stats.py
+STATS_PKL = os.path.join(CACHE, "stats.pkl")                # written by archive/profiling/stats.py
 # Named replay subsets (id lists live in tools/): the numbers in the READMEs were computed on these.
 GAME_SETS = {
-    "analysis371": os.path.join(REPO, "tools", "sel_games.txt"),    # replayed.pkl -> stats*, steal_se, oppmodel2
+    "analysis371": os.path.join(REPO, "tools", "sel_games.txt"),    # replayed.pkl -> stats2, steal_se, hu_phase, regimes
     "validation120": os.path.join(REPO, "tools", "sim_games.txt"),  # elim_depth, hand_outcomes, replay_stats, stack_depth
 }
 SIM_DIR = os.path.join(REPO, "sim")

@@ -5,7 +5,7 @@
 #   make validate       sim/poker_sim.py and the Java replayer each reproduce all 381 replays (~1 min)
 #   make reconstruct    data/cache/decisions.jsonl from all replays, and check that the committed
 #                       data/decisions.jsonl.gz (120 games) regenerates with identical content
-#   make cache          data/cache/replayed.pkl (analysis/analyze.py, ~1 min) and data/cache/stats.pkl
+#   make cache          data/cache/replayed.pkl (analysis/analyze.py, ~1 min)
 #   make preeq-check    analysis/preeq.tsv regenerates byte-identically from PreEq.java (~6 s)
 #   make solvers-check  eq.c smoke run + every solver script against its documented numbers (~25 s)
 #   make eq169-check    rebuild solvers/eq169.bin at 20k trials/pair and compare bytes (~50 s)
@@ -45,8 +45,6 @@ reconstruct:
 
 cache: replayer
 	$(PYTHON) analysis/analyze.py
-	$(PYTHON) analysis/stats.py > $(CACHE)/stats.txt
-	@test -s $(CACHE)/stats.pkl && echo "wrote $(CACHE)/stats.pkl (stats.py output in $(CACHE)/stats.txt)"
 
 preeq-check: replayer
 	@mkdir -p $(CACHE)

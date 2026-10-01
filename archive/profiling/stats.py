@@ -1,4 +1,5 @@
 import pickle, collections, json, statistics as S
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'analysis'))
 from analyze import PE, PCT, hclass
 from common import REPLAYED_PKL, STATS_PKL, load_leaderboard
 res=pickle.load(open(REPLAYED_PKL,'rb'))

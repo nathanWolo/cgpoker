@@ -13,8 +13,8 @@ per-turn budgets and offline training cost. Sources:
 unless noted. CodinGame itself uses g++ 11.2 on an unknown CPU. The bot must calibrate on its
 first turn (§6).
 
-The per-item character budget and the per-turn algorithm are in [`../plan.md`](../plan.md) §5 and
-§9. This document holds the measurements behind them.
+The per-item character budget and the per-turn algorithm are in [`../plan.md`](../plan.md) §7 and
+§4. This document holds the measurements behind them.
 
 ---
 
@@ -68,7 +68,7 @@ Every payload figure below assumes CJK14. With base64, each one would shrink by 
 
 The critique column is quoted as the critique stated it. Its rows do not add up exactly: 100k minus
 35-45k code, a 3k margin and 22-26k of tables leaves 26-40k, not 25-35k. The plan's itemised budget
-([`../plan.md`](../plan.md) §9: 20-30k of tables) leaves ≈22-42k, about 40-70k int8 parameters. Both
+([`../plan.md`](../plan.md) §7: 18-24k of tables, no opponent library) leaves ≈28-44k, about 49-77k int8 parameters. Both
 lead to the same working assumption of 40-60k parameters until a skeleton has been measured.
 
 The critique's case for more code: the bot must contain a full NLHE engine (side pots, the
@@ -95,7 +95,7 @@ Useful conversions at int8, which costs 8/14 ≈ 0.571 characters per parameter:
 
 At 12-14 bits per parameter, the same 100k-parameter net would take about 88k characters and not
 fit. **Plan on 40-60k int8 parameters until a minified M0-M3 skeleton has been measured**
-([`../plan.md`](../plan.md) §9).
+([`../plan.md`](../plan.md) §7).
 
 ## 3. Table sizes
 

@@ -219,8 +219,8 @@ The setting is different in four ways that matter:
   [`research/field.md`](research/field.md) §2), and every game is scored on placement;
 - the budget is 50 ms on a CPU and 100k characters of source.
 
-So poker needs about half of Ataraxos, and the most useful half plays a different role. Details
-and numbers: [`research/literature.md`](research/literature.md) §5-7 and
+So poker needs about half of Ataraxos. The plan ([`plan.md`](plan.md)) is equilibrium-first, so
+the half it uses keeps the paper's non-exploitative role. Details and numbers: [`research/literature.md`](research/literature.md) §5-7 and
 [`research/engineering.md`](research/engineering.md) §6-7.
 
 ### 8.1 Belief network → exact Bayes over 1,326 combos
@@ -229,53 +229,51 @@ The autoregressive belief transformer is unnecessary. For opponent j with hidden
 
 b_j(y | history) ∝ 1[y ∩ (our cards ∪ board) = ∅] · Π_τ σ_j(a_τ | y, state_τ)
 
-- σ_j is the policy we assume j plays: the anchor or population model for non-exploitative play,
-  or the fitted opponent model for exploitation.
+- σ_j is the policy we assume j plays. The plan uses our own strategy, as Ataraxos does
+  ("self-play-consistent" beliefs). Plugging in a fitted opponent model instead would turn the
+  same machinery into exploitation; that variant is archived
+  ([`../archive/plan_v1.md`](../archive/plan_v1.md) §6).
 - Add an ε floor so deterministic rule bots never produce a zero likelihood.
 - **Multiway**, the joint belief is Π_j b_j(y_j) restricted to disjoint hands. Sample it by
   rejection from the product of marginals.
 - **Cost.** The update is incremental. With table likelihoods it costs under 0.1 ms per observed
   action; with a 34k-100k-parameter net, about 1.2-5.5 ms.
-- **The likelihood is exact.** Every hand reveals all hole cards, folded ones included. Opponent
-  models are therefore fitted on exactly labelled data. Ataraxos had nothing like this.
+- **Revealed cards are not needed.** Every hand reveals all hole cards, which would make opponent
+  modelling easy, but self-consistent beliefs do not use them.
 
-### 8.2 Search → a KL-leashed exploitation operator, magnet = anchor
+### 8.2 Search: one damped self-play step, as in the paper
 
-Keep the closed-form step, but change what feeds it:
+The closed-form step carries over unchanged, with poker's cheaper ingredients:
 
 | part | Ataraxos | poker |
 |---|---|---|
-| anchor π_θ | the move network | our sound strategy: HU jam/fold Nash, distilled ICM jam/fold, charts, later a net |
-| q̂ | self-play values | values **against the modelled opponents**: the opponent model in both the belief likelihood and the rollouts |
-| exact cases | — | all-in and call-off equity and the river are exact, with no rollouts |
+| hidden-state samples | belief network | exact Bayes ranges under our own strategy (§8.1) |
+| q̂ | depth-40 rollouts of the move network for both players, value-net leaves | rollouts of our policy for every seat to the end of the hand; exact equity at all-in and river leaves |
+| step | π_s ∝ [exp(q̂)·ρ^α·π_θ^β]^(1/(α+β)) | the same, toward our policy π_θ |
 
-**The paper's KL-to-policy ablation carries over directly.** Without the leash, search overfits to
-its model. In poker the model's idiosyncrasies are *opponent-model error*. η becomes a risk dial:
+- It is **non-exploitative by construction**: beliefs and rollouts both assume opponents play our
+  strategy, so the step improves our play against an equilibrium-like opponent rather than against
+  anyone in particular.
+- **The paper's KL-to-policy ablation carries over.** Without the β term the search overfits to its
+  own rollout policy's quirks and falls below the raw network.
+- **Units.** The constants depend on the units of q̂. Stratego's α = 0.002, β = 0.02 (η = 50,
+  ηα = 0.1) are in win-probability units. In tournament-payout units Δq is often 0.001-0.05, so η
+  needs rescaling, or q̂ should be divided by the per-hand payout-per-BB slope first. With a uniform
+  magnet, a large ηα acts as a temperature on the policy and randomises near-deterministic
+  decisions (research critique); keep ηα ≤ 0.1, as in the paper.
+- Where it applies: the plan's optional M4, once a policy network exists. Before that, the bot
+  refines only the river, by exact CFR re-solving over the same self-consistent ranges (plan M2).
 
-- With α = 0, KL(π_s ‖ π_anchor) ≤ η·R̂, where R̂ is the range of q̂.
-- By Pinsker, the per-decision loss against any true q* is at most (R*/2)·√(2η·R̂).
-- In our HU 10 BB demo (`solvers/mmdstep2.py`), η = 3 gains +0.042 BB/hand against a nit and has
-  a worst case of −0.067 (Nash: −0.045). η = 10 gains +0.252 (91% of the best response), but its
-  worst case is −0.328.
+The research run also studied this step as a leashed exploitation operator, with q̂ computed
+against fitted opponent models. That direction is archived (`archive/plan_v1.md` §6;
+`solvers/mmdstep2.py` is the demo).
 
-The research critique adds three corrections:
+### 8.3 MMD-PPO self-play: the route to deep-stack equilibrium play
 
-1. **Set the magnet ρ to the anchor π₀, or keep ηα ≤ 0.1, as Stratego's constants do.**
-   - With a uniform ρ, the magnet term cancels and becomes a temperature 1 + ηα on the anchor.
-   - With η in prize units (100-5000), that temperature randomises deterministic push/fold
-     anchors. In the critique's example, the bot plays the non-anchor action 27% of the time even
-     though q̂ favours the anchor.
-   - With ρ = π₀ the step is π₀·exp(ηq̂/(1+ηα)).
-2. **Turn exploitation on first where q̂ is exact.** A noise-based cap on η, combined with
-   near-deterministic anchors, leaves the step inert wherever q̂ comes from a few hundred rollouts.
-3. **Budget risk from expected gain, not realised chips.** Use all-in equity or AIVAT-style
-   correction with the revealed cards, in the spirit of "risk only what you have won".
-
-### 8.3 MMD-PPO self-play: optional, for deep 3-4-player play
-
-Most placements are decided at short stacks, where push/fold and ICM methods suffice without
-learning. Self-play RL is therefore a later upgrade, kept only if it wins a local SPRT
-([`plan.md`](plan.md) M6). If built, it would look like this:
+Most placements are decided at short stacks, where push/fold and ICM solutions need no learning.
+Self-play RL is the plan's later, optional milestone ([`plan.md`](plan.md) M4) for the parts that
+tables and rules cover worst: deep heads-up and deep 3-4-player postflop play. It is kept only if it
+lowers measured exploitability and wins a local SPRT. It would look like this:
 
 - **Environment.** A C++ clone of the referee, playing whole tournaments with 2-4 seats and
   doubling blinds.
@@ -303,7 +301,8 @@ learning. Self-play RL is therefore a later upgrade, kept only if it wins a loca
   3-4-player game reaches it, at a median of 14-18 BB.
 - With 3-4 players there is no safety guarantee. One player can shift utility between the others
   (Szafron et al., 3-player Kuhn), and Pluribus disclaims convergence outside two-player
-  zero-sum. Treat the KL leash there as a regulariser toward self-play-consistent play, not a proof.
+  zero-sum. Treat self-play there as a route to self-play-consistent play, not to a guaranteed
+  equilibrium.
 
 ### 8.5 What to skip
 

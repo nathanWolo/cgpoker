@@ -1,7 +1,9 @@
 # The CodinGame Poker field (snapshot 2026-09-30)
 
-This document describes who we are playing against: the leaderboard, how the top bots play, how
-close the top is, and the field's common weaknesses. Sources: `research[1]` in
+This document describes the field we play in: the leaderboard, ranking mechanics, how close the
+top is, and where games are decided. Per-bot style profiles and weaknesses were moved to
+[`archive/profiling/field_profiles.md`](../../archive/profiling/field_profiles.md) on 2026-10-01,
+because the plan no longer models individual bots. Sources: `research[1]` in
 [`raw/workflow_results.json`](raw/workflow_results.json), re-checked against the data in this repo.
 
 **Data and sample sizes.** Read every percentage with its sample size in mind.
@@ -17,7 +19,7 @@ toward the top 6**. The selection rule was not preserved (`tools/README.md`). Wa
 4,843 hands, but many top-league bots appear in only 150-900 hands. Statistics for those bots
 have wide error bars.
 
-Provenance labels follow [`../plan.md`](../plan.md):
+Provenance labels:
 
 - **reproduced**: re-run here by the named script;
 - **ad hoc**: a one-off computation on repo data, with no committed script (none remain in this
@@ -115,57 +117,8 @@ in this section; "created" is the submission's creation date):
 
 ## 4. How the top bots play
 
-The numbers below are reproduced with `analysis/stats.py` and `analysis/stats3.py` on the 371
-replays. "Hands" is that bot's sample size. Column definitions:
-
-- **VPIP / PFR**: share of hands where the bot voluntarily put chips in / raised preflop.
-- **open**: share of unopened pots the bot raises or shoves.
-- **fold vs raise**: share of times the bot folds when it faces a preflop raise.
-- **call AI**: share of all-ins faced that the bot calls; n is the number of all-ins faced.
-- **bet when checked to**: postflop.
-- **fold vs bet**: postflop, facing a bet.
-
-| # | bot | hands | VPIP / PFR | open | fold vs raise | call AI (n) | bet when checked to | fold vs bet | notes |
-|---|---|---|---|---|---|---|---|---|---|
-| 1 | Waffle3z | 4,843 | .70 / .64 | .91 | .51 | .33 (169) | .97 | .62 | Loose-aggressive steal machine. Opens to 2 BB 22%, 5 BB 15%, 6 BB 11%. Postflop bets 0.5 pot 36%, 0.1 pot 26%. Calls all-ins with a median top-21% hand. Prints no messages. |
-| 2 | kovi | 4,082 | .26 / .12 | .13 | .79 | .36 (167) | .51 | .44 | Tight, rule-based. Limps 22% of unopened pots. Postflop bets are always pot-sized. |
-| 3 | BrandV | 3,682 | .63 / .41 | .64 | .21 | .63 (51) | .35 | .44 | Loose. Calls raises 68%. First preflop action is ALL-IN 66% at 10-20 BB and 90% below 10 BB. |
-| 4 | Zylo | 4,458 | .40 / .32 | .54 | .72 | .32 (151) | .33 | .45 | Tight-aggressive. |
-| 5 | Tuo | 3,714 | .18 / .18 | .20 | .85 | .59 (58) | .00 | 1.00 | Pure push/fold, even 120-240 BB deep. Median shove depth 20 BB; still shoves 8% of first actions at 50 BB or more. Postflop it only checks or folds. |
-| 6 | JuMaKre | 2,817 | .53 / .32 | .46 | .45 | .59 (37) | .33 | .41 | Monte Carlo equity vs pot odds (from its messages). |
-| 9 | MaxFerrer | 1,688 | .55 / .54 | .72 | .64 | .57 (28) | .25 | .82 | GTO push/fold chart plus exploit rules (from its messages). Opens to 2.5 BB 90% of the time. |
-| 10 | AGSigma | 655 | .09 / .09 | .11 | .97 | .17 (65) | .00 | 1.00 | Pure push/fold. |
-
-Debug messages give away several methods. Message templates, with counts (reproduced from
-`data/cache/stats.pkl`):
-
-| bot | templates |
-|---|---|
-| kovi | `# rule # #` (2,427), `# rnd` (259), `# shortfold-vs-raise` (236), `# anti-maniac` (145), `# push #bb #way` (92) |
-| JuMaKre | `check e=#` (1,036), `pf call e=# need=#` (430), `fold e=# po=#` (402) |
-| supernakash | `eq: #,#s` (2,853), i.e. about 45 ms of Monte Carlo per turn |
-| kozlov-ma | `eq=# (raw # #) po=# edge=+# tex=# call` |
-| MaxFerrer | `XPT.PF.MB` (642), `GTO.PF.CF` (455), `GTO.PF.RSHV` (252) |
-| Tux4711 | `D - F #`, `D - O #`, ... |
-
-Waffle3z, BrandV, Zylo, Tuo and AGSigma print nothing. **No top bot shows signs of a solver or a
-learned policy.** The field is rules, charts and equity-versus-pot-odds.
-
-**Where Waffle3z wins** (reproduced, `analysis/stats2.py`). It nets +0.46 BB/hand overall. By
-effective stack:
-
-| effective stack | BB/hand | hands |
-|---|---|---|
-| <10 BB | +0.06 | 583 |
-| 20-40 BB | +0.56 | 1,007 |
-| 40-80 BB | +0.94 | 1,146 |
-
-So stealing and aggression pay off in the middle phase. These means have no standard errors and
-are noise-dominated.
-
-**The live lower-league boss** (agent 5117680) behaves differently from the
-`CALL;CALLING STATION` template in the referee repo. It limps 43% of unopened pots and folds 95%
-when raised (n = 55, 343 hands).
+Moved to [`archive/profiling/field_profiles.md`](../../archive/profiling/field_profiles.md): the
+current plan does not profile individual bots.
 
 ## 5. How close the top is, and non-transitivity
 
@@ -214,63 +167,7 @@ kovi is #2 while winning only 19% of its 4-player games.
 
 ## 6. Common weaknesses
 
-Reproduced with `analysis/stats3.py` and `analysis/stats.py` unless marked.
-
-**Over-folding to small preflop opens** (fold rate facing an open to ≤3 BB):
-
-| folds a lot | | folds little | |
-|---|---|---|---|
-| kovi | .78 (n=1,021) | Waffle3z | .35 (n=1,039) |
-| insomnia_rooster | .77 (n=173) | BrandV | .09 (n=794) |
-| Zylo | .68 (n=854) | babaaurhum | .07 (n=54) |
-| wala | .67 (n=92) | SmogyY | .00 (n=99) |
-| M_C | .64 (n=144) | UnTypedScript | .00 (n=95) |
-| MaxFerrer | .55 (n=429) | | |
-
-A pure steal breaks even at these fold rates:
-
-| open to | HU | 3p | 4p |
-|---|---|---|---|
-| 2 BB | 50% | 43% | 37.5% |
-| 2.5 BB | 57% | 50% | 44% |
-
-These figures count the opener's own posted SB, which comes back on a successful steal (research
-plan; the research's "Design 2" figures of 67/57/50% were wrong).
-
-In the replays, opens to (2, 3] BB win the blinds uncontested 44.1% of the time HU (n = 1,609),
-34.4% at 3p (n = 1,812) and 23.7% at 4p (n = 832) (`analysis/steal_se.py`). The steal EVs
-themselves are noise-dominated: for example, 4p opens to ≤2 BB net +2.89 ± 1.64 BB (n = 64).
-
-**Over-folding to small postflop bets** (facing about half pot or less):
-
-| bot | fold rate | n |
-|---|---|---|
-| insomnia_rooster | .86 | 69 |
-| MaxFerrer | .83 | 152 |
-| Tux4711 | .71 | 297 |
-| fr3sh2d3atH | .57 | 605 |
-| Waffle3z | .54 | 367 |
-
-**Limpers and calling stations** (share of unopened pots limped): kozlov-ma .87 (n = 200),
-trictrac .80 (96), babaaurhum .71 (221), gpoussel_ .65 (1,115), supernakash .60 (726). Value-bet
-them thin and do not bluff them.
-
-**Maniacs.**
-
-- SmogyY raises 94% of unopened pots, to a median 50.5 BB.
-- UnTypedScript raises 95%, to a median 25.5 BB.
-- Both called every all-in they faced, but n = 9 and n = 12. Their median calling hands are in the
-  top 61% and 67%.
-- Call off wider against them.
-
-**Exploitable patterns in the top two.**
-
-- Waffle3z bets 97% when checked to, then folds 62% when it faces a bet. That invites
-  check-raises.
-- Tuo and AGSigma only check or fold postflop, and fold 85% and 97% when raised preflop. Their blinds can be stolen.
-
-**Timeouts happen in the top league.** deuwii timed out on its first action in game 906358479, and
-[CG]CohereCommandA-Python in game 906523528. A timeout eliminates the bot.
+Also moved to [`archive/profiling/field_profiles.md`](../../archive/profiling/field_profiles.md).
 
 ## 7. Where games are decided
 
@@ -296,18 +193,10 @@ double every 10 hands and there are only 4,800 chips.
    small enough to solve almost exactly offline, and it is where most bust-outs happen.
 3. **Optimise placement, not chips.** 75% of tables have 3-4 players, where ICM changes the
    calling ranges.
-4. **The weaknesses have direct counters:**
-   - small steals against the over-folders;
-   - small, frequent postflop bets against bots that fold 70-86% to them;
-   - thin value against stations;
-   - wider call-offs against maniacs;
-   - check-raises against Waffle3z.
-5. **Every hand reveals all cards**, so classifying opponents online (nit, push/fold, station,
-   maniac, LAG) within one 40-70-hand game is realistic. Names are not in the input. Open-size
-   signatures fingerprint bots: MaxFerrer opens to 2.5 BB 90% of the time, kozlov-ma to 2.0 BB 100%.
-6. **The target moves.** #1, #3 and #6 resubmitted in the week before the snapshot, and battle
-   histories vanish when a bot resubmits. Harvest replays early and keep timestamps (research
-   critique).
+4. **Bots differ wildly in style.** That is why an equilibrium bot can win without modelling
+   anyone: equilibrium play profits from every opponent's mistakes without having to identify them.
+5. **The target moves.** #1, #3 and #6 resubmitted in the week before the snapshot. Rankings drift
+   even if our bot does not change.
 
 Unresolved questions about the field (the boss's code and score, the exact score formula, what
 happened on 2026-09-25) are tracked in [`../open_questions.md`](../open_questions.md).

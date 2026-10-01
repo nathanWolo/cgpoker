@@ -139,10 +139,11 @@ to train, and seconds per decision to play. It has no separate figures for the c
   AAMAS 2013). This "kingmaker" effect has no 2-player analogue.
 - So at 3-4 players **equilibrium play is not "safe"**. MMD's convergence guarantee holds only in
   two-player zero-sum games, which here means the HU phase, where U ≈ stack/4800. At 3-4 players,
-  CFR+, fictitious play and MMD-PPO are heuristics. Rank is won through ICM-aware survival and
-  through exploitation.
+  CFR+, fictitious play and MMD-PPO are heuristics. The research run concluded that rank is won
+  through ICM-aware survival and exploitation; the current plan deliberately takes only the first
+  (equilibrium-first, [`../plan.md`](../plan.md) §0).
 - About 95-99% of 3-4p games reach an HU phase, at a median effective stack of 14-18 BB, so the HU
-  phase matters in almost every game (critique; [`../plan.md`](../plan.md) §2 fact 4).
+  phase matters in almost every game (critique; [`../plan.md`](../plan.md) §1 fact 4).
 
 ## 5. MMD and update equivalence
 
@@ -223,6 +224,9 @@ This bound is local, per decision.
 
 ## 6. Opponent modelling and safe exploitation
 
+Kept as background. The current plan does not model opponents ([`../plan.md`](../plan.md) §0);
+the tools are archived in [`archive/profiling/`](../../archive/profiling/README.md).
+
 | method | idea | source |
 |---|---|---|
 | Restricted Nash Response | Assume the opponent plays the model with probability p, and best-respond robustly | Johanson, Zinkevich & Bowling, NIPS 2007 |
@@ -240,8 +244,8 @@ What transfers:
   (hand, context, action) triple. Guo's bias does not arise.
 - **Strong priors are essential**, given 55-63 decisions per opponent per game. Use a population
   model, or a library of leaderboard bots with a posterior over which one we face. Open-size
-  signatures help fingerprint bots ([field.md §8](field.md#8-implications)).
-- **The library model measures well** (reproduced, `oppmodel/oppmodel2.py`, leave-one-game-out on
+  signatures help fingerprint bots ([`archive/profiling/field_profiles.md`](../../archive/profiling/field_profiles.md)).
+- **The library model measures well** (reproduced, `archive/profiling/oppmodel/oppmodel2.py`, leave-one-game-out on
   the 371 replays). Next-action log-loss, in nats per decision:
 
   | decisions | population | online only | library types + online correction | static "oracle" table |
@@ -277,7 +281,9 @@ What transfers:
 
 ## 7. Ataraxos components, sorted for poker
 
-See [`../ataraxos.md`](../ataraxos.md) for the paper itself.
+See [`../ataraxos.md`](../ataraxos.md) for the paper itself. This table is the research run's
+verdict; the current equilibrium-first plan uses the one-step step as the paper does, toward our
+own policy with self-play rollouts (plan M4), and self-play RL as its route to deep-stack play.
 
 | component | verdict for CodinGame Poker |
 |---|---|

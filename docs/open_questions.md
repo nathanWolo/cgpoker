@@ -1,10 +1,14 @@
 # Open questions
 
-These are the unresolved questions behind [`plan.md`](plan.md). They come from every `open_questions`
-list in [`research/raw/workflow_results.json`](research/raw/workflow_results.json), the critique's
-`missing_items`, and issues found while writing the plan. Each entry gives why the question matters,
-how to resolve it, and the milestone where it should be resolved. IDs (Q-A1, ...) are referenced
-from the plan.
+These are the unresolved questions behind [`plan.md`](plan.md), the equilibrium-first plan. They
+come from the research run ([`research/raw/workflow_results.json`](research/raw/workflow_results.json)),
+its critique, and writing the plan. Each entry says why the question matters, how to resolve it,
+and the milestone where it should be resolved. IDs (Q-A1, ...) are referenced from the plan.
+
+Questions about opponent modelling, bot fingerprinting and replay harvesting were dropped on
+2026-10-01 together with that part of the plan (see [`../archive/`](../archive/README.md); the old
+list is in git history). Remaining IDs were kept so old references still resolve; gaps in the
+numbering are the dropped questions.
 
 Status, 2026-10-01: all open.
 
@@ -57,9 +61,8 @@ Status, 2026-10-01: all open.
 - *Why:* the plan uses 41/34/25% (4p/3p/HU) from 2,495 recent battles of the top 37 bots. Waffle3z's
   last 134 battles were 43/38/19%. The arena mix and the per-size weighting of gains both depend on
   this.
-- *Resolve:* tabulate the table-size mix by rating band from the harvested battle lists over time,
-  and from our own battles after each submission.
-- *When:* M0 harvest, then ongoing.
+- *Resolve:* tabulate the table-size mix from our own battles after each submission.
+- *When:* after the first submissions.
 
 ---
 
@@ -97,57 +100,21 @@ Status, 2026-10-01: all open.
 - *Why:* promotion requires finishing ahead of the boss. The live boss (agent 5117680) limps 43% of
   unopened pots and folds 95% when raised, unlike the `CALLING STATION` template in
   `config/Boss.java`. Its score needs a division-room leaderboard endpoint that was not found.
-- *Resolve:* the first live submission answers whether M0 promotes. Fit a boss archetype from its
-  replays for the zoo.
+- *Resolve:* the first live submission answers whether M0 promotes.
 - *When:* M0.
 
 ---
 
-## C. Data, terms of service and the field
+## C. Data and terms of service
 
-**Q-C1. Do CodinGame's terms allow bulk replay download and automated IDE play?**
-- *Why:* the harvest (`tools/fetch_replays.py`), library refreshes, live post-mortems and the
-  CGBenchmark-style real-opponent release gate all rely on undocumented endpoints:
-  `findLastBattlesByTestSessionHandle`, `gameResult/findByGameId`, and IDE play.
-- *Resolve:* read the current terms and, if they are unclear, ask CodinGame before any bulk use.
-  If they disallow it:
-  - continue with the 381 local games and our own battles;
-  - replace the real-opponent gate with manual IDE spot checks.
-- *When:* week 1, before the harvest starts.
-
-**Q-C2. What are the rate limits of those endpoints?**
-- *Why:* battle history disappears when a bot resubmits, so a refresh has to finish within days. A
-  throttle that is too aggressive risks a block.
-- *Resolve:* run at the tool's minimum of 2 s between requests and back off on any error. Record
-  observed failures. `tools/fetch_replays.py` has so far been tested only with `--dry-run` and
-  mocked network calls, never against the live API.
-- *When:* M0.
-
-**Q-C3. How fast does a bot library go stale?**
-- *Why:* the identification rates of 43/66/81/90% (after 5/10/20/40 decisions) and 0.653 nats were
-  measured inside one 371-game window, with library and targets from the same pool. #1, #3 and #6
-  (Waffle3z, BrandV, JuMaKre) resubmitted between 25 and 30 September.
-- *Resolve:*
-  1. Once there are two or more weekly harvests, fit on week *t* and score on week *t+1*, tagged by
-     `submissionId`.
-  2. Measure how much log-loss and identification degrade, and set the refresh cadence and the
-     recency weighting from that.
-- *When:* M4 (needs the archive started in M0).
-
-**Q-C4. What do the top authors say about their approaches?**
-- *Why:* the forum thread has 0 replies. Discussion probably happens on CodinGame's Discord, which
-  the research could not access. Why 10 bots were submitted on 2026-09-25 is unknown: an event, a
-  challenge, or a language update.
-- *Resolve:* watch the forum and Discord. This is low priority, because style statistics from
-  replays matter more.
-- *When:* opportunistic.
-
-**Q-C5. Are 371 games enough for per-matchup and depth-specific statistics?**
-- *Why:* coarse style statistics are fine. Per-matchup profits, and ranges at specific depths for
-  less active bots, have wide error bars (e.g. Tuo against kovi rests on n = 18).
-- *Resolve:* grow the archive (Q-C1) and always report standard errors (`analysis/steal_se.py`
-  style).
-- *When:* ongoing.
+**Q-C1. Do CodinGame's terms allow automated replay download?**
+- *Why:* the plan no longer needs more replays; the 381 committed ones validate the engine and the
+  tracker. Fetching our own bot's battles for post-mortems still uses the undocumented
+  `findLastBattlesByTestSessionHandle` and `gameResult/findByGameId` endpoints
+  (`tools/fetch_replays.py`, never run against the live API).
+- *Resolve:* read the terms before any automated use; otherwise inspect our games by hand in the
+  web viewer.
+- *When:* before the first post-mortem.
 
 ---
 
@@ -191,13 +158,11 @@ Status, 2026-10-01: all open.
   boundary implicit.
 - *When:* M1, M5.
 
-**Q-D5. Do the postflop realisation factors converge, and do they depend on opponent type?**
+**Q-D5. Do the postflop realisation factors converge?**
 - *Why:* the preflop solves (M2 HU, M3 3-4p) value flop leaves at pot · R(position, SPR, N) ·
-  equity. R comes from blueprint self-play and is re-measured once after the re-solve. Against the
-  real field, realisation differs: stations realise less, nits fold more.
+  equity. R comes from our own play against itself and is re-measured once after the re-solve.
 - *Resolve:*
-  1. Track how much R and the preflop strategy change between solve iterations 1 and 2.
-  2. Measure R against the zoo archetypes, and decide whether type-specific R belongs in M4.
+  Track how much R and the preflop strategy change between solve iterations 1 and 2.
 - *When:* M2-M3.
 
 **Q-D6. For 3-4p deep charts, does the solver (CFR+ or fictitious play) matter?**
@@ -210,92 +175,39 @@ Status, 2026-10-01: all open.
 **Q-D7. Is single-hand ICM enough, or is a learned tournament value W (FGS) needed?**
 - *Why:* ICM ignores blinds and position. Ganzfried-Sandholm found it off by up to $2.99 per $100 at
   3p jam/fold. W must be trained on simulated tournaments: arena data confound chips with skill.
-- *Resolve:* in M5, train W on simulated zoo tournaments, starting from ICM, and A/B it against ICM
+- *Resolve:* in M5, train W on simulated self-play tournaments, starting from ICM, and A/B it against ICM
   in the arena.
 - *When:* M5.
 
-**Q-D8. Is Waffle3z's hyper-aggression near-equilibrium for these blinds, or exploitable?**
-- *Why:* it raises 90% of unopened pots and bets 97% when checked to. Pure push/fold Tuo finishes
-  ahead of it 24/43 times, which suggests it is exploitable. This bears on what the anchor should do
-  against a LAG even with η = 0.
-- *Resolve:* in the arena, play the M2/M3 anchor against a Waffle3z-style archetype and report
-  regime-level chip EV. Check whether a calibrated calling range punishes the LAG without any
-  opponent model.
-- *When:* M2-M3.
-
----
-
-## E. Opponent modelling and exploitation
-
-**Q-E1. Can live bots be fingerprinted within 10-20 hands, and is a library worth its characters?**
-- *Why:* names are not in the input. In-sample identification is 66% after 10 decisions and 81%
-  after 20. A library costs 3-8k chars, while a generic few-parameter adaptive model costs almost
-  nothing.
-- *Resolve:*
-  1. Time-split evaluation (Q-C3) of library + online versus online-only, and of bet-size
-     signatures as extra fingerprint features.
-  2. An arena ablation of types versus population-only within M4.
-- *When:* M4.
-
-**Q-E2. What stack resolution do the jam and call-off contexts need?**
-- *Why:* `oppmodel/oppmodel2.py` splits depth only at 15 BB, so it cannot tell call-off ranges at
-  5 BB from those at 12 BB, which is where M4a exploitation pays.
-- *Resolve:* add buckets (≤6, 6-12, 12-20, >20 BB) to the jam and call contexts. Measure log-loss
-  on those decisions alone and the cost in characters.
-- *When:* M4 (the counters are recorded from M1).
-
-**Q-E3. How should model confidence combine across 2-3 opponents in a multiway pot?**
-- *Why:* the step scales η, or gates switching, by a confidence c, but each opponent has its own
-  model and confidence. The plan's default, c = min_j c_j over opponents still in the hand, is
-  conservative.
-- *Resolve:* ablate min_j against influence weighting (each opponent's share of the q̂ difference)
-  and a joint-posterior check, in M4 multiway spots.
-- *When:* M4.
-
-**Q-E4. How should G_t be estimated, and what should ε₀ and κ be?**
-- *Why:* the risk budget must spend *expected* gifts from opponent mistakes, not realised chips. The
-  all-in-adjusted estimator removes runout luck only after all-ins. The anchor-vs-anchor baseline
-  per seat and depth has to be tabulated. ε₀ = 0 is the strict, near-Nash default.
-- *Resolve:*
-  1. Measure the variance of G_t in the arena with and without AIVAT-style corrections on non-all-in
-     streets.
-  2. Tune κ (and optionally ε₀ > 0) by SPRT against the scripted and shape-shifter opponents.
-- *When:* M4, M5.
-
-**Q-E5. Rule A switching or soft anchors?**
-- *Why:* near-deterministic anchors make the MMD step inert unless deviations are gated discretely
-  (Rule A). A soft anchor, softmax(Q_anc/τ), instead makes the KL leash meaningful everywhere. The
-  two trade off gain against risk differently.
-- *Resolve:* implement both behind a flag, unit-test that each keeps a deterministic anchor
-  deterministic when Δq = 0, and SPRT them.
-- *When:* M4.
-
-**Q-E6. Is rollout-based q̂ ever confident enough to trigger a deviation?**
-- *Why:* the switching rule needs Δq̂ > z·SE. The research estimated 1,000-2,500 rule-policy
-  rollouts per action per regime in ~28 ms, or 2.4-5k network rollouts per turn. Whether a few
-  hundred rollouts per action give a small enough SE, given poker's outcome variance, was never
-  measured.
-- *Resolve:* in M4b, measure the actual SE of CRN rollouts with exact all-in and river leaves on
-  logged real spots. Count how often Rule A or Rule B would deviate. Drop M4b if the answer is
-  "almost never".
-- *When:* M4b.
-
-**Q-E7. Do opponents adapt within a game and punish exploitation?**
-- *Why:* kovi has an `anti-maniac` rule. A bot that changes style mid-game makes the type posterior
-  stale.
-- *Resolve:*
-  1. Run shape-shifter archetypes in the arena (one type for 20-40 decisions, then a switch).
-  2. In reconstructed replays, test for within-game drift of each bot's action frequencies.
-  3. In our own live games, compare opponents' behaviour before and after our deviations.
-- *When:* M4.
-
-**Q-E8. Which likelihoods should the η = 0 bot's range tracker use: the anchor's or the population's?**
-- *Why:* a near-Nash postflop blueprint still needs opponent ranges. With anchor likelihoods (the
-  Ataraxos assumption), a maniac's 50 BB open looks far too strong. Population likelihoods calibrate
-  to the field without targeting anyone, but they move the bot off "self-play-consistent" play.
-- *Resolve:* A/B both in M2 via SPRT, with per-archetype reports. Pick the default to match the
-  near-Nash preference unless the population version wins clearly.
+**Q-D8. How big an HU abstraction fits the character budget, and how much does distillation lose?**
+- *Why:* full postflop tables do not fit (plan §2, M2), so M2 ships preflop tables plus a distilled
+  postflop net. Both the abstraction size and the net size trade against exploitability.
+- *Resolve:* in M2 week 1, count decision nodes × buckets for candidate trees. After solving, measure
+  the distilled net's policy KL to the CFR solution and its exploitability in the abstraction
+  against the tabular solution's.
 - *When:* M2.
+
+**Q-D9. Is unsafe river re-solving good enough, and how many CFR iterations fit?**
+- *Why:* re-solving with ranges built from our own strategy is cheap but can be exploitable; safe
+  re-solving (Brown & Sandholm 2017) costs more. The ~0.1 ms per iteration figure is an estimate.
+- *Resolve:* time the river solver at CodinGame speed; compare blueprint, unsafe and safe re-solving
+  by local best response.
+- *When:* M2.
+
+**Q-D10. How cheap can local best response be made, and how tight is it?**
+- *Why:* LBR is the plan's real-game exploitability yardstick (plan §5). Its cost grows with the
+  number of candidate actions and the rollouts per action, and it only gives a lower bound.
+- *Resolve:* implement LBR on the C++ engine with exact river equity; check it against exact best
+  responses where both exist (the jam/fold game, the abstract HU game).
+- *When:* M2.
+
+**Q-D11. Self-consistent beliefs: how much do they cost against bots far from equilibrium?**
+- *Why:* ranges are updated with our own strategy's likelihoods. A bot that opens to 50 BB with
+  anything looks far too strong under that model. Population-calibrated likelihoods would be
+  closer to the field but are a step away from equilibrium play.
+- *Resolve:* only if results suggest it: compare the ε floor values, and measure how often
+  observed actions have near-zero likelihood under our strategy.
+- *When:* M2-M3.
 
 ---
 
@@ -305,18 +217,10 @@ Status, 2026-10-01: all open.
 - *Why:* 0.61 (HU) and 0.80 (4p) come from deterministic toy bots (`eval/dup.py`, `eval/dup4.py`).
   Bots that sample their actions decorrelate the duplicates unless their RNG is seeded per
   duplicate. All SPRT game-count estimates depend on this ratio.
-- *Resolve:* in M0, re-measure with the baseline bot and the zoo, with observation-hash RNG seeding.
+- *Resolve:* in M0, re-measure with the baseline bot and the generic opponents, with observation-hash
+  RNG seeding.
   Also measure the paired candidate-vs-baseline design.
 - *When:* M0.
-
-**Q-F2. Do arena gains against clones transfer to live play?**
-- *Why:* clones only saw states the real bots reached, so they extrapolate on new lines. In-sample
-  library fits leak into "held-out" clones.
-- *Resolve:*
-  1. Split by time between the library and the clones.
-  2. Run the CGBenchmark-style real-opponent channel (Q-C1).
-  3. Track the correlation between arena Δp and accumulated live Δp across submissions.
-- *When:* M4 onward.
 
 **Q-F3. How much local evidence justifies a resubmission?**
 - *Why:* about 100 live games give ±5 pp on p, roughly ±0.75 score points, while #1-#5 are close
@@ -345,28 +249,27 @@ Status, 2026-10-01: all open.
 
 **Q-G1. What is the real minified code size of the bot?**
 - *Why:* the research's ~25k-char estimate was optimistic by 1.5-2×. The plan assumes 35-45k, and
-  the room for any M6 network (≈40-60k int8 parameters) depends on it.
+  the room for the net (≈40-60k int8 parameters) depends on it.
 - *Resolve:* minify the M0 skeleton and the M3 bot with crossfish `tools/cg_minify.py` and record
   characters per module.
 - *When:* M0, M3.
 
 **Q-G2. Is 8-bit quantisation enough, or is 6-bit Rice/GPTQ needed?**
-- *Why:* this matters only for the M6 network (policy logits, range-update likelihoods) and for
-  table precision. The equity table at 8 bits has steps of 0.0039, close to its MC SE of 0.0035.
+- *Why:* this matters for the nets (M2 distillation, M4) and for table precision. The equity table at 8 bits has steps of 0.0039, close to its MC SE of 0.0035.
 - *Resolve:*
   1. Measure the policy KL between float and quantised weights (target <0.005) and the arena impact.
   2. Check that the 8-bit equity table changes no M1 jam/call decision compared with float.
-- *When:* M0 (table), M6 (net).
+- *When:* M0 (table), M2/M4 (net).
 
 **Q-G3. Can range updates with network likelihoods keep up at 4 players?**
 - *Why:* about 3 ms per opponent action for a 100k net with the first-layer trick, and up to 6
-  actions per turn at 4p, is tight. Table likelihoods (M2-M5) cost microseconds.
-- *Resolve:* time it in M6 at CodinGame speed. Fall back to 169-class preflop updates or EHS buckets.
-- *When:* M6.
+  actions per turn at 4p, is tight. Table likelihoods cost microseconds.
+- *Resolve:* time it in M4 at CodinGame speed. Fall back to 169-class preflop updates or EHS buckets.
+- *When:* M4.
 
 ---
 
-## H. Training (M6, optional)
+## H. Training (M4, optional)
 
 **Q-H1. How many samples does MMD-PPO need on 2-4p escalating-blind sit-and-gos with a 40-60k
 parameter net?**
@@ -374,21 +277,19 @@ parameter net?**
 - *Resolve:* run the HU pilot first, measured by exact exploitability in the jam/fold game with
   `solvers/pf.py`'s best response, or value ≥0 against Nash jam/fold plus local best response.
   Scale only if it converges.
-- *When:* M6.
+- *When:* M4.
 
-**Q-H2. Is MMD-PPO self-play stable and useful at 3-4 players, and which opponent pool should it
-use?**
+**Q-H2. Is MMD-PPO self-play stable and useful at 3-4 players?**
 - *Why:* there is no convergence guarantee outside two-player zero-sum games. Self-play may cycle or
-  settle into passive conventions. A pool of K-best checkpoints and clones may make the blueprint too
-  exploitative or not exploitative enough against the real field.
+  settle into passive conventions.
 - *Resolve:*
-  1. Monitor against a fixed baseline pool.
-  2. Ablate the pool composition (self-only, ≥50% self, clones).
-  3. Ship only through the M6 SPRT gate.
-- *When:* M6.
+  1. Monitor against fixed references: the M1-M3 bots and our own Nash solutions.
+  2. Ablate self-play against a pool of past checkpoints.
+  3. Ship only through the M4 SPRT gate.
+- *When:* M4.
 
 **Q-H3. Should advantage filtering be used at all?**
 - *Why:* raw poker returns are dominated by card luck, so filtering would select noise.
 - *Resolve:* enable it only after the privileged critic and all-in equity substitution are in place
   and the critic's explained variance exceeds 0.3. Ablate filter rates 0, 0.5 and 0.75.
-- *When:* M6.
+- *When:* M4.

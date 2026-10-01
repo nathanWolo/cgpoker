@@ -9,7 +9,7 @@ Offline test of an opponent model. It asks two questions about the live field:
 
 ```
 python3 analysis/analyze.py      # once: builds data/cache/replayed.pkl (371 games; ~1 min)
-python3 oppmodel/oppmodel2.py    # 13 s
+python3 archive/profiling/oppmodel/oppmodel2.py    # 13 s
 ```
 
 The script reads `data/cache/replayed.pkl` and takes `PCT` and `hclass` from `analysis/analyze.py`. It runs from any working directory.

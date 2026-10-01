@@ -2,7 +2,7 @@
 
 Usage: python3 analysis/analyze.py [game_set]   (game_set: analysis371 (default) | validation120 | all | path to id list)
 Writes data/cache/replayed.pkl = [(gameId, names, ranks, scores, driver_output), ...].
-Also imported by the stats/oppmodel scripts for the preflop tables PE / PCT and hclass().
+Also imported by the stats scripts (and archive/profiling/) for the preflop tables PE / PCT and hclass().
 """
 import json, glob, collections, sys, re, pickle, os
 from concurrent.futures import ThreadPoolExecutor

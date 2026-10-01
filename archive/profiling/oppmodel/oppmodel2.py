@@ -1,7 +1,7 @@
 # Opponent-model experiment on 371 reconstructed replays: how fast can a within-game
 # model beat a population model, and how fast can a bot be fingerprinted from a library?
 import pickle, collections, math, sys, json
-import os; sys.path.insert(0,os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),'analysis'))
+import os; sys.path.insert(0,os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','..','..','analysis'))
 from analyze import PCT, hclass
 from common import REPLAYED_PKL
 res=pickle.load(open(REPLAYED_PKL,'rb'))   # data/cache/replayed.pkl from analysis/analyze.py

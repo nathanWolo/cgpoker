@@ -307,7 +307,7 @@ All of these are reproduced by the `analysis/` scripts named in each line.
   | 3p | 45 | 44.5 / 46 / 16-64 | 191 / 311 |
   | 4p | 48 | 46.4 / 46 / 24-70 | 229 / 339 |
 
-- 371 games (`analysis/stats.py`): median 40 / 47 / 46 hands. 0 games reached the cap.
+- 371 games (`analysis/replay_stats.py analysis371`): median 40 / 47 / 46 hands. 0 games reached the cap.
 - Actions per hand in 4-player games, by blind level: 7.3, 6.67, 4.88, 3.23, 2.44, 2.24, 1.61.
 - Preflop decisions are 52% / 60% / 63% of all decisions for 2 / 3 / 4-player starts (61% overall,
   13,895 of 22,916).
