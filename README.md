@@ -13,7 +13,7 @@ docs is labelled with the script that reproduces it.
 
 **Status (2026-10-01):** M0 of [`docs/plan.md`](docs/plan.md) is built: the C++ engine (validated
 against the Python port and the 381 replays), the bot's state tracker, a baseline bot that bundles
-to a 27k-character CodinGame submission, and the local arena with paired SPRT. The plan (milestones
+to a 28k-character CodinGame submission, and the local arena with paired SPRT. The plan (milestones
 M0-M5): play as close to an equilibrium as fits in 50 ms and 100k characters, without modelling
 individual opponents, and see how far that gets. Next: M1, short-stack equilibrium.
 

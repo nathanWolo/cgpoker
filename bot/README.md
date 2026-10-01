@@ -14,8 +14,8 @@ python3 tools/bundle.py --minify     # build/cg/poker_bundled.cpp (readable) and
 ```
 
 Both files are compiled with CodinGame's own flags (`-std=gnu++17 -Werror=return-type -g -pthread`, no
-`-O`; the sources carry `#pragma GCC optimize("O3")`). Observed: bundled 60,906 chars, minified
-27,369 chars, cap 100,000. The minified binary's output on a recorded stdin is identical to the
+`-O`; the sources carry `#pragma GCC optimize("O3")`). Observed: bundled 61,552 chars, minified
+27,644 chars, cap 100,000. The minified binary's output on a recorded stdin is identical to the
 bundled one (`tools/bundle.py` checks compilation; the output comparison was done by hand with
 `sim/poker_sim.py`'s `obs_to_stdin`).
 
