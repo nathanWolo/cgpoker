@@ -253,6 +253,16 @@ probabilities). M3.1, a 3-4-player preflop solve at 20-100 BB with equity-realis
 built (`solvers/pfd/`) but not shipped: its leaf model makes it limp half its hands at 20-30 BB and
 the live games showed no leak at those depths ([pfd/README.md](../solvers/pfd/README.md)).
 
+**M2.2 (same night): a second bet size, tables merged on pot and stack. Tried, not shipped.**
+Postflop nodes keyed by (street, pot bucket, stack-behind bucket, actions available, this street's
+history) on a log-1.25 grid of the real pot and stacks, averaged over the stack points and lines that
+share a key, cut the postflop tables from 34.8k to 20.7k bytes at no measurable cost (−0.000 ± 0.008
+per 2-player game against M2.1). The room was spent on a pot-sized bet next to the half-pot one, but
+that solution, at the same 400M iterations, lost −0.011 ± 0.006 per 2-player game against M2.1
+(+0.005 ± 0.003 at all sizes): the tree is 2.5× larger and converges less, and more nodes are averaged
+per key. Everything is kept in `archive/m2_2/` with the numbers; the solver keeps the pot-sized bet
+behind `hu --two-sizes`. The shipped bot stays M2.1.
+
 ### M3: 3-4-player deep play (≈2 weeks)
 
 1. **Preflop charts** for N = 3, 4 by position × facing action × stack bucket (15-150 BB), for this

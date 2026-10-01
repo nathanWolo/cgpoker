@@ -9,7 +9,15 @@ standard error; "pass" is the SPRT at H1 = +0.01 payout per game.
   3-4 players: it limped 78% of unopened pots at ≤ 12 BB and called half the raises it faced;
   15 of 84 games ended blinded down below 2 BB (`analysis/shortstack.py`).
 - M1 (committed before you slept): ICM push/fold charts for 3-4 players, +0.021 ± 0.003 per game
-  against M0.1b at all sizes. `submissions/m1_min.cpp` is the file you were going to submit.
+  against M0.1b at all sizes.
+- **M1 went live** (you submitted it before sleeping) and finished its 87 placement games at
+  **rank 2 of 194, score 30.66** (M0.1b: rank 5, 29.15). Mean payout 0.603 against 0.570, pooled
+  finish-ahead 0.607 against 0.554. The short-stack leak is gone: at ≤ 10 BB effective it now wins
+  0.33 BB per hand (was −0.08), at 10-20 BB 0.17 (was −0.06), 3 blind-downs instead of 15, and the
+  unopened short-stack pots are 53% fold / 47% jam instead of 78% limp. The chips now go the other
+  way deep: −0.30 BB per hand at 20-50 BB and −0.38 above 50 BB (was +0.25 / +0.89), partly because
+  rank 2 means harder opponents, partly noise (87 games), and partly the heuristic deep play. That
+  is what M2 and M2.1 below address heads-up; 3-4-player deep play is still heuristic.
 
 ## 2. M2: the solved heads-up game (8-30 BB)
 - `solvers/hu/`: an abstract no-limit heads-up game (fold / limp / raise / all-in preflop, check /
@@ -29,6 +37,11 @@ standard error; "pass" is the SPRT at H1 = +0.01 payout per game.
   CodinGame's flags and plays whole games in the referee port identically to the readable build).
 
 ## 4. Tried and not shipped
+- M2.2, a second bet size with the tables merged on pot and stack (`archive/m2_2/`): the merge is
+  free (−0.000 ± 0.008 against M2.1) and shrinks the submission by 6k characters, but the pot-sized
+  bet it paid for lost −0.011 ± 0.006 per 2-player game at the same 400M iterations (the tree is
+  2.5× larger and converges less). The shipped bot stays M2.1; the retry is more iterations and a
+  proper exploitability comparison.
 - M3.1, 3-4 player preflop at 20-100 BB by CFR+ with equity-realisation leaves (`solvers/pfd/`):
   works, but the leaf model decides the answer and makes it limp half its hands at 20-30 BB; the
   live games showed no leak at those depths, so it stays an experiment.

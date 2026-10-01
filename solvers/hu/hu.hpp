@@ -6,7 +6,7 @@
 //     BB after a limp:  K  R (raise to 3)  A
 //     facing a raise:   F  C  R (3-bet to 3x, only the BB over the SB's open)  A
 //     facing all-in:    F  C
-//   Flop / turn / river, BB first:  K  B (bet half the pot)  A;  facing a bet:  F  C  A (raise all-in)
+//   Flop / turn / river, BB first:  K  B (bet half the pot)  [b (bet the pot), --two-sizes]  A;  facing a bet:  F  C  A
 //   A bet or raise that would put a player all-in is the all-in action.  Showdown pays min(commitments).
 // Cards.  Preflop the 169 classes; postflop NB buckets per street by quantiles of EHS, the hand's
 //   expected showdown equity against a random hand (Monte Carlo runouts; exact on the river).
@@ -25,8 +25,9 @@
 
 namespace hu {
 constexpr int NB = 10, NSTREET = 4, MAXA = 4;
-enum Act { F = 0, C = 1, R = 2, A = 3, K = 4, B = 5 };
-inline const char* act_name(int a) { static const char* n[] = {"F", "C", "R", "A", "K", "B"}; return n[a]; }
+inline bool TWO_SIZES = false;        // also a pot-sized bet postflop (hu.cpp --two-sizes; M2.2 experiment, not shipped)
+enum Act { F = 0, C = 1, R = 2, A = 3, K = 4, B = 5, P = 6 };   // B: half-pot bet, P: pot-sized bet
+inline const char* act_name(int a) { static const char* n[] = {"F", "C", "R", "A", "K", "B", "b"}; return n[a]; }
 inline int combos_of(int c) { int r1 = c / 13, r2 = c % 13; return r1 == r2 ? 6 : r1 > r2 ? 4 : 12; }
 inline std::string class_name(int c) {
   const char* R_ = "23456789TJQKA"; int r1 = c / 13, r2 = c % 13; std::string s;
@@ -133,10 +134,11 @@ struct Tree {
     } else if (street == 0 && hist == "C") {                                            // BB after a limp
       acts.push_back({K, c1}); add_raise_to(R, 3.0); if (acts.back().first != A) acts.push_back({A, S});
     } else {                                                                            // postflop, not facing
-      acts.push_back({K, c[toact]}); add_raise_to(B, c[toact] + 0.5 * (c0 + c1)); if (acts.back().first != A) acts.push_back({A, S});
+      acts.push_back({K, c[toact]}); add_raise_to(B, c[toact] + 0.5 * (c0 + c1)); if (TWO_SIZES) add_raise_to(P, c[toact] + 1.0 * (c0 + c1));
+      if (acts.back().first != A) acts.push_back({A, S});
     }
     // dedupe A (two paths could add it)
-    for (size_t i = 1; i < acts.size(); i++) if (acts[i].first == A && acts[i - 1].first == A) { acts.erase(acts.begin() + i); break; }
+    for (size_t i = 1; i < acts.size(); ) if (acts[i].first == A && acts[i - 1].first == A) acts.erase(acts.begin() + i); else i++;
     n.nact = acts.size();
     nodes[id] = n;
     for (int k = 0; k < n.nact; k++) {
@@ -153,7 +155,7 @@ struct Tree {
           if (street == 3) ch = terminal(street, nc, 3, depth + 1, h2);
           else ch = build(street + 1, nc[0], nc[1], 1, h2 + "/", 0, false, depth + 1);
         } else ch = build(street, nc[0], nc[1], other, h2, raises, true, depth + 1);
-      } else ch = build(street, nc[0], nc[1], other, h2, raises + (a == R || a == B || a == A), false, depth + 1);
+      } else ch = build(street, nc[0], nc[1], other, h2, raises + (a == R || a == B || a == P || a == A), false, depth + 1);
       nodes[id].act[k] = a; nodes[id].child[k] = ch;
     }
     return id;

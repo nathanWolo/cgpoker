@@ -42,7 +42,10 @@ action: the strategy is mixed. Off-tree histories (a 4-bet, a timeout) and every
 to the rules below. `hu_max_bb` (env `BOT_HU`, 0 disables) is the upper gate, 150 BB; beyond 120 BB the
 120 BB tables are used. M2.1 added the 40-120 BB stack points and the 150 BB gate: against M1 in 2-player
 games +0.045 ± 0.006 (gate 40 with 8-30 BB tables: +0.020; gate 60: +0.027), +0.008 ± 0.003 at all sizes;
-against M2: **+0.025 ± 0.006 payout per 2-player game** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,470 games; the gain is in heads-up play, which 3-4-player games reach late and short). Also tried ranking by expected hand strength (draws count) instead of made-hand rank: +0.000 ± 0.003 against M2 at all sizes, so the simpler ranking stays. Arena of the 8-30 BB version, paired against M1: **+0.020 ± 0.005 payout per game in 2-player games** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,551 games: 3-4-player games reach heads-up late and short, where M1 already played jam/fold); against M0.1b over all sizes +0.035 ± 0.004.
+against M2: **+0.025 ± 0.006 payout per 2-player game** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,470 games; the gain is in heads-up play, which 3-4-player games reach late and short). M2.2 (tried, not shipped, `archive/m2_2/`): postflop tables merged on (street, pot, stack behind,
+actions, street history) of the real pot and stacks cost nothing (−0.000 ± 0.008 against M2.1) and
+freed 6k characters, but the pot-sized bet they paid for lost −0.011 ± 0.006 per 2-player game at the
+same iteration budget. Also tried ranking by expected hand strength (draws count) instead of made-hand rank: +0.000 ± 0.003 against M2 at all sizes, so the simpler ranking stays. Arena of the 8-30 BB version, paired against M1: **+0.020 ± 0.005 payout per game in 2-player games** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,551 games: 3-4-player games reach heads-up late and short, where M1 already played jam/fold); against M0.1b over all sizes +0.035 ± 0.004.
 
 ## Policy (M1)
 

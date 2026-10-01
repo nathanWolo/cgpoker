@@ -11,7 +11,7 @@ preflop and all three postflop streets, from one solve of an abstract no-limit g
 
 ```sh
 build/hu/hu pool 2000000 1 data/cache/hu/pool.bin          # 30 s
-build/hu/hu grid 8,10,12,15,20,30,40,60,120 400000000 data/hu/grid9.bin data/cache/hu/pool.bin   # about 20 min on 4 cores (make hu-tables)
+build/hu/hu grid 8,10,12,15,20,30,40,60,120 400000000 data/hu/grid9.bin data/cache/hu/pool.bin   # about 10 min on 4 cores (make hu-tables)
 python3 solvers/hu/export_hu.py --grid data/hu/grid9.bin
 ```
 
@@ -21,11 +21,12 @@ Both players start with S BB; the SB (button) posts 0.5, the BB 1.
 
 - Preflop, SB first: fold, limp, raise to 2.5, all-in. BB after a limp: check, raise to 3, all-in.
   Facing a raise: fold, call, 3-bet to 3× (only the BB over the open), all-in. Facing all-in: fold, call.
-- Flop, turn, river, BB first: check, bet half the pot, all-in; facing a bet: fold, call, raise all-in.
+- Flop, turn, river, BB first: check, bet half the pot, all-in; facing a bet: fold, call, raise all-in
+  (`--two-sizes` adds a pot-sized bet: the M2.2 experiment, see `archive/m2_2/`).
 - A bet or raise that would put a player all-in is the all-in action. Showdown pays the matched chips.
 
-That is 528 nodes and 3,810 information sets at 10 BB (a few more at deeper stacks where raises
-stop collapsing into all-ins), perfect recall. Cards: the 169 classes preflop; postflop 10 buckets per
+That is 528 nodes and 3,810 information sets at 10 BB (more at deeper stacks where raises stop
+collapsing into all-ins), perfect recall. Cards: the 169 classes preflop; postflop 10 buckets per
 street by quantiles of EHS, the hand's expected showdown equity against a random hand (100 Monte Carlo
 runouts; exact on the river). Chance is a pool of 2M sampled deals shared by every stack point, with
 the buckets and the showdown result precomputed, so the solver's game is the pool-sampled one.
@@ -52,6 +53,7 @@ sets), one valued out of sample understates it, so both are reported; the truth 
 | 15 | +0.023 | 0.012 / 0.032 |
 | 20 | +0.037 | 0.014 / 0.039 |
 | 30 | +0.071 | 0.017 / 0.056 |
+| 60 (400M iterations) | +0.117 | 0.006 / 0.068 |
 
 For reference, the SB's value when restricted to jam or fold (`pf.py`) is −0.045 BB/hand at 10 BB,
 −0.08 at 12 BB, −0.13 at 15 BB and −0.18 at 20 BB: the unrestricted game is worth 0.05-0.2 BB/hand
@@ -59,6 +61,14 @@ more to the SB (the plan's Q-D1).
 
 Deeper stacks (`data/hu/grid_deep.bin`, 40-120 BB at 150M iterations) were tested against the
 8-30 BB tables in the arena before the 9-stack solve: see the M2.1 note in `docs/plan.md`.
+
+## Shipping it (`export_hu.py`)
+
+Every decision node of every stack point, 4-bit probabilities per bucket and action, CJK14-packed:
+32.8k characters for the nine stacks; the bot rebuilds the tree from the rules and checks a count and
+a hash of the histories. A merged representation (postflop nodes keyed by street, pot, stack behind,
+actions and street history, 20.7k instead of 34.8k postflop bytes, no measurable cost) is in
+`archive/m2_2/` for when a richer abstraction needs the room.
 
 ## What the bot does with it (`bot/hu_play.hpp`)
 

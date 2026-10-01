@@ -2,6 +2,7 @@
 //   hu pool N SEED OUT [runouts]           sample the deal pool (data/cache/hu/pool.bin)
 //   hu solve S ITERS [POOL] [BRDEALS]      solve one stack (BB); prints preflop frequencies, value, exploitability
 //   hu grid S1,S2,.. ITERS OUT [POOL]      solve every stack in parallel and write the average strategies
+//   --two-sizes (any command)              add the pot-sized bet to the abstraction (the M2.2 experiment)
 #pragma GCC optimize("O3")
 #include <chrono>
 #include <cstdlib>
@@ -24,6 +25,7 @@ static void write_strategy(FILE* f, const Solver& s) {
 int main(int argc, char** argv) {
   if (argc < 2) { fprintf(stderr, "usage: see header\n"); return 2; }
   std::string cmd = argv[1];
+  for (int i = 1; i < argc; i++) if (std::string(argv[i]) == "--two-sizes") { hu::TWO_SIZES = true; for (int j = i; j + 1 < argc; j++) argv[j] = argv[j + 1]; argc--; break; }
   pe::init();
   if (cmd == "pool") {
     int n = atoi(argv[2]); uint64_t seed = atoll(argv[3]); std::string out = argv[4]; int runouts = argc > 5 ? atoi(argv[5]) : 100;

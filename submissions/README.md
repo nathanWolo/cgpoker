@@ -16,7 +16,7 @@ environment. Regenerate with `make bot` (`tools/bundle.py --minify`).
 | `m2_min.cpp` | M2: the solved heads-up 8-30 BB game (`solvers/hu/`, MCCFR; preflop and postflop, mixed strategy) played heads-up at 8-40 BB effective, on top of M1. `DEBUG = true`, `PONDER = false`. Arena, paired against M1: **+0.020 ± 0.005 payout per game in 2-player games** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,551 games: 3-4-player games reach heads-up late and short, where M1 already played jam/fold); against M0.1b over all sizes +0.035 ± 0.004. | this commit |
 | `m2_bundled.cpp` | the same, readable (136k chars, over the cap: submit the minified one) | commit 2ba5741 |
 | `m2_1_min.cpp` | M2.1: the heads-up tables extended to 120 BB (9 stack points, 400M iterations) and played up to 150 BB effective. `DEBUG = true`, `PONDER = false`. Arena, paired against M2: **+0.025 ± 0.006 payout per 2-player game** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,470 games; the gain is in heads-up play, which 3-4-player games reach late and short). | this commit |
-| `m2_1_bundled.cpp` | the same, readable (over the cap: submit the minified one) | this commit |
+| `m2_1_bundled.cpp` | the same, readable (over the cap: submit the minified one) | commit b9b662f |
 
 To run the pondering probe, set `PONDER = true` near the top of `bot/main.cpp` (or in the bundled
 file: `const bool PONDER = true;`) and rebuild or paste the edited bundled file; it is under the cap
