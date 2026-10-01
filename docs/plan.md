@@ -99,6 +99,13 @@ identical bots). Not yet done: the equity-table payload (deferred to M1, where i
 the ICM call-off thresholds (M1), the live probe submission and the gcc 11.2 docker gate, which
 need the owner's CodinGame account and crossfish's `tools/cg_gate`.
 
+**M0.1 (2026-10-01), after the first 23 live games** (`analysis/postmortem.py`; 23/23 reproduced,
+0 timeouts, 0 replaced outputs, pooled finish-ahead 0.65 in the lower league, 4p 0/7 first): ICM
+for big calls with 3-4 alive (pulled forward from M1), jam/fold heads-up up to 12 BB, and
+self-consistent range beliefs (a bet means strength; a shove deeper than our own shoving depth is
+off-tree and gets the uniform belief). Paired arena vs M0 on a maniac/jammer/station/random field:
++0.026 ± 0.006 payout, SPRT pass ([`bot/README.md`](../bot/README.md)).
+
 1. **C++ engine.** Port `sim/poker_sim.py` with every quirk ([`sim/README.md`](../sim/README.md)).
    - Gate 1: a differential fuzz of 1e6 random-action hands against `poker_sim.py`, covering side
      pots, the odd chip, action replacement, the raise cap, NONE rounds, the 600-cap refund and the

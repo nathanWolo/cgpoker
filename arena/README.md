@@ -11,12 +11,14 @@ python3 arena/freeze.py                      # freeze bot/bot.hpp as bot/bot_pre
 | option | meaning |
 |---|---|
 | `--mix 41,34,25` | share of 4p / 3p / 2p tables (the live arena's mix) |
-| `--opp a,b,c` | opponent pool, assigned round robin to the non-dev seats: `prev`, `station` (calls everything), `jammer` (preflop all-in 35% else fold, postflop call), `random` (uniform over the offered actions), `folder` |
+| `--opp a,b,c` | opponent pool, assigned round robin to the non-dev seats: `prev`, `station` (calls everything), `jammer` (preflop all-in 35% else fold, postflop call), `maniac` (shoves every hand preflop, calls postflop: most of the lower league), `random` (uniform over the offered actions), `folder` |
 | `--dup` | play every seat rotation of each (seed, lineup) |
 | `--mode pair` | also play each game with `prev` in dev's seat; report the paired payout difference |
 | `--sprt D1` | Gaussian SPRT on the paired differences, H0 mean 0 vs H1 mean D1 payout units, α = β = 0.05 (bounds ±2.94) |
 | `--trials K` / `--ms M` | fast mode (fixed Monte Carlo trials) / fidelity mode (wall-clock budget) |
 | `--log FILE` | one line per game: variant, seed, lineup, scores, payouts |
+| `ARENA_TRACE=1` (env) | print every dev decision of the first game to stderr |
+| `BOT_JF=N` (env) | set the dev bot's heads-up jam/fold depth (BB) for tuning |
 
 Payout is the TrueSkill-implied placement value ((1,0), (1,.5,0), (1,.6444,.3556,0); ties share).
 "dev finishes ahead of X" is the pairwise finish-ahead rate against each opponent type.

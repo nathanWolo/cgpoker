@@ -3,6 +3,7 @@
 //
 //   arena [--games N] [--seed S] [--threads T] [--mix 41,34,25] [--opp station,jammer,random,prev]
 //         [--mode eval|pair] [--dup] [--ms M | --trials K] [--log FILE] [--sprt D1 [--alpha A --beta B]]
+// Opponents: prev, station, jammer (35% shove), maniac (always shoves preflop), random, folder.
 //
 // eval: dev plays N games; each game draws its table size from --mix (4p,3p,2p) and its opponents
 //       from --opp (round robin).  --dup plays every seat rotation of the same seed and lineup.
@@ -41,11 +42,13 @@ struct Stats { long decisions = 0; double ms_total = 0, ms_max = 0; long trials 
 
 template <class B, class Bud>
 struct BotAgent : pk::Agent {
-  B b; Bud budget; Stats* st;
+  B b; Bud budget; Stats* st; bool trace = false;
   bool act(const pk::Obs& o, std::string& out) override {
     auto t0 = Clock::now();
     out = b.act(o, budget, t0);
     double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    if (trace) fprintf(stderr, "r%d h%d bb%d %s %s pot %d call %d stack %d eq %.3f %s -> %s\n", o.round, o.hand_nb, b.tr.bb, o.cards.c_str(), o.board.c_str(),
+                       b.tr.pot, b.tr.call_amount(b.tr.players[b.tr.me]), o.stacks[o.player_id], b.last_equity, b.last_tag.c_str(), out.c_str());
     st->decisions++; st->ms_total += ms; st->ms_max = std::max(st->ms_max, ms); st->trials += b.last_trials; st->desync += b.tr.desynced;
     return true;
   }
@@ -62,6 +65,13 @@ struct Jammer : pk::Agent {                  // preflop: all-in with probability
     else if (rng.uni() < q) out = "ALL-IN";
     else out = can_check ? "CHECK" : "FOLD";
     return true;
+  }
+};
+struct Maniac : pk::Agent {                  // shoves every hand preflop (what the lower league mostly is), calls postflop
+  bool act(const pk::Obs& o, std::string& out) override {
+    bool preflop = o.board[0] == 'X', can_allin = false;
+    for (auto& a : o.possible) can_allin |= a == "ALL-IN";
+    out = preflop && can_allin ? "ALL-IN" : "CALL"; return true;
   }
 };
 struct RandomLegal : pk::Agent {             // uniform over the offered actions (a BET_x is played as the minimum)
@@ -89,7 +99,10 @@ struct Opts {
 static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts& o, Stats* st) {
   if (name == "dev") {
     auto* a = new BotAgent<bot::Bot, bot::Budget>();
-    a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed; return a;
+    a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed;
+    a->trace = getenv("ARENA_TRACE") != nullptr;
+    if (getenv("BOT_JF")) a->b.jamfold_max_bb = atof(getenv("BOT_JF"));
+    return a;
   }
   if (name == "prev") {
     auto* a = new BotAgent<prev::Bot, prev::Budget>();
@@ -98,6 +111,7 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
   if (name == "station") return new Station();
   if (name == "jammer") { auto* a = new Jammer(); a->rng = Rng{seed}; a->q = 0.35; return a; }
   if (name == "random") { auto* a = new RandomLegal(); a->rng = Rng{seed}; return a; }
+  if (name == "maniac") return new Maniac();
   if (name == "folder") return new Folder();
   fprintf(stderr, "unknown agent %s\n", name.c_str()); exit(2);
 }

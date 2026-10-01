@@ -13,9 +13,11 @@ REPO = os.path.dirname(HERE)
 BOT = os.path.join(REPO, "bot")
 
 src = open(os.path.join(BOT, "bot.hpp"), encoding="utf-8").read()
-pf = open(os.path.join(BOT, "pf_tables.hpp"), encoding="utf-8").read()
-pf = re.sub(r"^\s*#\s*pragma\s+once\s*\n", "", pf, count=1).replace("namespace pf", "namespace pf_prev")
-src = src.replace('#include "pf_tables.hpp"\n', "")
+pf = ""
+for name in ("pf_rank.hpp", "pf_tables.hpp"):
+    t = open(os.path.join(BOT, name), encoding="utf-8").read()
+    pf += re.sub(r"^\s*#\s*pragma\s+once\s*\n", "", t, count=1).replace("namespace pf", "namespace pf_prev")
+    src = src.replace(f'#include "{name}"\n', "")
 src = src.replace("namespace bot", "namespace prev").replace("pf::", "pf_prev::")
 src = re.sub(r"^\s*#\s*pragma\s+once\s*\n", "", src, count=1)
 head = ("#pragma once\n// bot_prev.hpp - FROZEN copy of bot/bot.hpp made by arena/freeze.py; do not edit.\n"

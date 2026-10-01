@@ -29,7 +29,7 @@ int main() {
   auto t_init = Clock::now();
   bot::Bot b;
   bot::Budget budget;
-  budget.ms = 20;                                       // placeholder until CodinGame latency is measured
+  budget.ms = 15;                                       // placeholder until CodinGame latency is measured (max observed turn 24 ms at 20)
   pk::Obs o;
   bool first = true;
   Clock::time_point t_last_flush = t_init;
