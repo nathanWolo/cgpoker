@@ -122,7 +122,9 @@ class Bot {
   long decisions = 0, trials_total = 0;
   bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
   double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
-  double hu_max_bb = 150;                 // heads-up: the solved 8-120 BB strategy (hu_play.hpp) up to this effective stack; beyond the last stack point its tables
+  bool hu_postflop = false;               // heads-up tables postflop too (false: preflop only, the rules play postflop; the arena's passive opponents crush the tables' postflop play)
+  double hu_shove_bb = 1e9;               // facing a preflop all-in deeper than this (BB): the rules (uniform belief) decide, not the tables
+  double hu_max_bb = 20;                  // heads-up: the solved strategy (hu_play.hpp) up to this effective stack (BB); 150 lost to M1 against the exploitative field, 20 is neutral
   double pfn_max_bb = 20;                 // 3-4 players, preflop: the ICM push/fold chart decides first-in, over limps and against a raise up to this stack (BB); 20 beat 12 in the arena
 
   // table-free value of the best 5 of k (5..7) cards
@@ -197,7 +199,11 @@ class Bot {
           bool facing = !cur.empty() && (cur.back() == 'B' || cur.back() == 'A');
           double pot_before = tot[0] + tot[1];                                     // chips in the pot before this bet
           double behind = eff - std::max(tot[0], tot[1]);                          // the effective stack left to bet
-          c = facing || e.added > std::sqrt(0.5 * pot_before * std::max(behind, 1.0)) || e.added >= 0.6 * behind ? 'A' : 'B';
+          bool big = e.added > std::sqrt(0.5 * pot_before * std::max(behind, 1.0)) || e.added >= 0.6 * behind;
+          if (facing && !big) { ok = false; return h; }   // a small raise of a bet: the tree only knows all-in raises, and
+                                                           // answering a min-raise with the fold-to-shove range lost live;
+                                                           // off-tree, the pot-odds rules price it
+          c = facing || big ? 'A' : 'B';
           break;
         }
         default: ok = false; return h;
@@ -411,8 +417,10 @@ class Bot {
       double eff_start = (double)std::min(my_start, opp_start) / bb;
       if (eff_start >= hu_t::STACKS[0] - 1e-9 && eff_start <= hu_max_bb) {
         bool ok; std::string h = hu_history(ok);
+        int st = n_board == 0 ? 0 : n_board - 2;
+        if (st > 0 && !hu_postflop) ok = false;
+        if (st == 0 && !h.empty() && h.back() == 'A' && eff_start > hu_shove_bb) ok = false;
         if (ok) {
-          int st = n_board == 0 ? 0 : n_board - 2;
           int bucket = st == 0 ? cls : hu_bucket(st, ehs(hole, board, n_board));
           const HuNode* nd = nullptr;
           char a = hu_decide(std::min(eff_start, hu_t::STACKS[hu_t::NS - 1]), h, bucket, rng.uni(), &nd);

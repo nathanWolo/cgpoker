@@ -147,6 +147,8 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
     if (getenv("BOT_SLOW")) a->b.use_fast = false;        // test the table-free evaluator path
     if (getenv("BOT_PFN")) a->b.pfn_max_bb = atof(getenv("BOT_PFN"));
     if (getenv("BOT_HU")) a->b.hu_max_bb = atof(getenv("BOT_HU"));
+    if (getenv("BOT_HUPOST")) a->b.hu_postflop = atoi(getenv("BOT_HUPOST")) != 0;
+    if (getenv("BOT_HUSHOVE")) a->b.hu_shove_bb = atof(getenv("BOT_HUSHOVE"));
     return a;
   }
   if (name == "prev") {

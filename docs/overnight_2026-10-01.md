@@ -1,4 +1,4 @@
-# Overnight report, 2026-10-01 (for the morning review)
+# Overnight report, 2026-10-01 (for the morning review), with the morning's live result
 
 What changed while you slept, in order; each step was validated in the arena and committed. The
 numbers are paired-game payout differences (same seeds and seats, both bots swapped in), ± one
@@ -35,6 +35,21 @@ standard error; "pass" is the SPRT at H1 = +0.01 payout per game.
 - Final confirmation against M2: **+0.025 ± 0.006 payout per 2-player game** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,470 games; the gain is in heads-up play, which 3-4-player games reach late and short).
 - **Submit `submissions/m2_1_min.cpp`** (91,412 characters characters of the 100k cap; it compiles with
   CodinGame's flags and plays whole games in the referee port identically to the readable build).
+
+## 3c. Morning: M2.1 live and M2.3
+- **M2.1 went live at rank 13 (27.44)**, down from M1's rank 2: two-player games 6/18. The retrace
+  of all 84 games through the submitted binary (`analysis/retrace.py`, 100% reproduction) pinned it
+  to the action translation: a raise was compared with the raiser's own stack, so a 50 BB raise by
+  a 400 BB stack counted as a 2.5 BB open and the strategy called it off with 78o and JTo. The
+  arena never showed it because none of its opponents raised more than 2.5 BB.
+- M2.3 fixes the translation (sizes against the effective stack, geometric midpoint), uses a
+  nonlinear probability code, and adds big-raise and limper opponents to the arena.
+  With those opponents the arena says: the full tables beat M1 copies (+0.030) and a big raiser (+0.054)
+  but lose 0.19 per 2-player game to a limper and a calling station (equilibrium bluffs against
+  players who never fold), −0.08 on the mixed exploitative field. Tables preflop only and up to
+  20 BB are neutral against M1 everywhere (−0.003 ± 0.002 at all sizes); that is `submissions/m2_3_min.cpp`.
+  Since it is M1 within noise, the recommended next live run is `m1_min.cpp` again, which also tells
+  how reproducible a placement run's rank is. The full table is in `bot/README.md`.
 
 ## 4. Tried and not shipped
 - M2.2, a second bet size with the tables merged on pot and stack (`archive/m2_2/`): the merge is

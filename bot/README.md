@@ -31,6 +31,28 @@ bundled one (`tools/bundle.py` checks compilation; the output comparison was don
 `tools/cg_minify.py` is crossfish's minifier plus `--keep NAMES` (identifiers it must not rename:
 nested `std::chrono` names) and a few more std member names (`rfind`, `compare`, `what`, ...).
 
+## Policy (M2.3)
+
+M2.1 live: rank 13 of 194 (M1: rank 2), 2-player games 6/18. The retrace of the live games
+(`analysis/retrace.py`) found the leak: the raise-size translation used the raiser's own stack, so a
+50 BB raise from a deep stack was a 2.5x open to the tables and got called off with junk; 19% of
+the preflop raises the live field made were over 20 BB. M2.3: sizes are mapped against the
+*effective* stack by the geometric-midpoint rule (a raise to r BB is all-in when r > sqrt(tree size
+× effective stack); a bet of x chips is all-in when x > sqrt(half pot × stack behind) or ≥ 60% of
+it), the tables use a nonlinear 16-level probability code, and the arena has `bigbet` (8 BB opens,
+4x 3-bets, 1.5x-pot overbets) and `limper` opponents. What the arena then showed, 2-player games paired against M1:
+
+| configuration (2-player games, paired against M1) | M1 copies | old field (maniac/jammer/station/random) | bigbet | limper+station | all four exploiters |
+|---|---|---|---|---|---|
+| M2.3, tables everywhere to 150 BB | +0.030 ± 0.006 | −0.041 ± 0.005 | +0.054 ± 0.007 | **−0.189 ± 0.005** | −0.080 ± 0.006 |
+| tables to 40 BB | | | | | −0.039 ± 0.004 |
+| tables to 20 BB | +0.007 ± 0.005 | | | | −0.005 ± 0.003 |
+| tables preflop only, to 150 BB | | | | | −0.016 ± 0.005 |
+| **tables preflop only, to 20 BB (M2.3)** | +0.004 ± 0.005 | +0.001 ± 0.003 | +0.004 ± 0.005 | −0.009 ± 0.002 | +0.001 ± 0.003 (all table sizes: −0.003 ± 0.002) |
+| tables off (control) | | | | | +0.002 ± 0.003 |
+
+The solved heads-up strategy beats copies of M1 and a big-raise opponent, and is crushed by passive callers (a limper and a calling station: −0.19 payout per 2-player game), because an equilibrium strategy bluffs and semi-bluffs at frequencies that only pay against an opponent who folds; M1's rules never bluff. The live field at rank 10-40 is evidently passive enough for that to dominate. The shipped M2.3 uses the tables preflop only and only up to 20 BB effective, which is neutral against M1 on every opponent set; everything deeper and postflop is M1's rules again. Switches: `hu_max_bb` (env `BOT_HU`), `hu_postflop` (`BOT_HUPOST`), `hu_shove_bb` (`BOT_HUSHOVE`).
+
 ## Policy (M2)
 
 Changes over M1 (below): heads-up with 8-150 BB effective at the start of the hand, the bot plays the

@@ -126,6 +126,13 @@ int main() {
     h = b.hu_history(ok); check("hu: a third-pot bet is B", ok && h == "CK/B" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
     b.tr.hand_log.clear(); act(0, pk::A_CALL, 20, 40, 810, false, 0); act(1, pk::A_CHECK, 0, 40, 3910, false, 0); act(1, pk::A_BET, 160, 240, 3750, false, 3);
     h = b.hu_history(ok); check("hu: a pot-sized bet with 20x pot behind is B", ok && h == "CK/B" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+    // we (BB, seat 0) bet half pot on the flop, the opponent min-raises: off-tree (the rules price it); a big raise is all-in
+    b.tr.hand_log.clear(); act(1, pk::A_CALL, 20, 40, 3890, false, 0); act(0, pk::A_CHECK, 0, 40, 770, false, 0);
+    act(0, pk::A_BET, 40, 80, 730, false, 3); act(1, pk::A_BET, 80, 120, 3810, false, 3);
+    h = b.hu_history(ok); check("hu: a min-raise of our bet is off-tree", ok ? 0 : 1, 1, 0);
+    b.tr.hand_log.clear(); act(1, pk::A_CALL, 20, 40, 3890, false, 0); act(0, pk::A_CHECK, 0, 40, 770, false, 0);
+    act(0, pk::A_BET, 40, 80, 3810, false, 3); act(1, pk::A_BET, 600, 640, 3290, false, 3);
+    h = b.hu_history(ok); check("hu: a big raise of our bet is all-in", ok && h == "CK/BA" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
   }
   printf("%s (%d failures)\n", fails ? "FAIL" : "PASS", fails);
   return fails ? 1 : 0;

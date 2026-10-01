@@ -263,6 +263,32 @@ that solution, at the same 400M iterations, lost −0.011 ± 0.006 per 2-player 
 per key. Everything is kept in `archive/m2_2/` with the numbers; the solver keeps the pot-sized bet
 behind `hu --two-sizes`. The shipped bot stays M2.1.
 
+**M2.1 live (2026-10-02, 84 placement games): rank 13 of 194, score 27.44.** A regression from M1's
+rank 2 / 30.66. Two-player games 6/18 (M1: 19/32); heads-up phases from an even start won 44%
+(M1: 66%). `analysis/retrace.py` replays every live game through the submitted binary and gets its
+decision tag per turn (it reproduced 7,151 of 7,152 live actions), so the losses can be attributed:
+21 calls of at least half our stack through the tables lost 269 BB, and the three worst were one
+bug: the raise-size translation compared a raise with the *raiser's* stack, so a 50 BB raise by a
+400 BB stack counted as a 2.5 BB open and the strategy called it off with 78o and JTo. The live
+field raises big: 19% of the preflop raises we faced were over 20 BB. **M2.3** maps every raise and
+bet to the nearer of the tree's size and all-in at the geometric midpoint against the effective
+stack, uses a nonlinear 16-level probability code (the linear one distorted the all-in frequencies
+by 0.07 summed over classes), and adds big-raise and limper opponents to the arena, which had never
+produced a raise larger than 2.5 BB. Then the arena with those opponents settled the question (2-player games, paired against M1):
+
+| configuration (2-player games, paired against M1) | M1 copies | old field (maniac/jammer/station/random) | bigbet | limper+station | all four exploiters |
+|---|---|---|---|---|---|
+| M2.3, tables everywhere to 150 BB | +0.030 ± 0.006 | −0.041 ± 0.005 | +0.054 ± 0.007 | **−0.189 ± 0.005** | −0.080 ± 0.006 |
+| tables to 40 BB | | | | | −0.039 ± 0.004 |
+| tables to 20 BB | +0.007 ± 0.005 | | | | −0.005 ± 0.003 |
+| tables preflop only, to 150 BB | | | | | −0.016 ± 0.005 |
+| **tables preflop only, to 20 BB (M2.3)** | +0.004 ± 0.005 | +0.001 ± 0.003 | +0.004 ± 0.005 | −0.009 ± 0.002 | +0.001 ± 0.003 (all table sizes: −0.003 ± 0.002) |
+| tables off (control) | | | | | +0.002 ± 0.003 |
+
+The solved heads-up strategy beats copies of M1 and a big-raise opponent, and is crushed by passive callers (a limper and a calling station: −0.19 payout per 2-player game), because an equilibrium strategy bluffs and semi-bluffs at frequencies that only pay against an opponent who folds; M1's rules never bluff. The live field at rank 10-40 is evidently passive enough for that to dominate. The shipped M2.3 uses the tables preflop only and only up to 20 BB effective, which is neutral against M1 on every opponent set; everything deeper and postflop is M1's rules again ([bot/README.md](../bot/README.md)). The equilibrium-first stance stands for the regimes where it
+won live (ICM push/fold at 3-4 players, jam/fold heads-up); for deep and postflop heads-up play the
+abstraction has to get much richer, and robust to passive opponents, before it goes live again.
+
 ### M3: 3-4-player deep play (≈2 weeks)
 
 1. **Preflop charts** for N = 3, 4 by position × facing action × stack bucket (15-150 BB), for this
