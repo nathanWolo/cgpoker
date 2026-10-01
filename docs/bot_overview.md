@@ -1,4 +1,4 @@
-# How the bot works, end to end (M0.1b, 2026-10-01)
+# How the bot works, end to end (M1, 2026-10-01)
 
 One turn, from stdin to stdout, with the parts that make it work. File references are to this
 repository; the numbers are the ones measured in [`bot/README.md`](../bot/README.md),
@@ -98,19 +98,29 @@ In order:
    offline by fictitious play (`solvers/pf.py`, exported by `solvers/export_pf.py`) and stored as
    bits, about 0.2k characters. 12 BB was tuned in the arena; at 25 BB it cost against calling
    stations.
-2. **A big call (≥ 40% of our stack).**
+2. **3-4 players, preflop, only folds and jams so far: ICM push/fold chart.** Facing a jam, always;
+   first in, when our stack is ≤ 12 BB. The chart (`bot/pfn_tables.hpp`) comes from
+   `solvers/pfn/`, a fictitious-play solver of the exact jam/fold game of this referee (every
+   non-BB posts the small blind) with ICM leaves: 6 decision nodes for 3 players, 14 for 4, solved
+   on a grid of every player's stack (343 and 1,296 configurations) and distilled to one class
+   ranking per node plus a threshold per grid point, interpolated in log-stack at runtime. A limp
+   or a raise before us is off the chart's tree and falls through to the rules below. This is what
+   the live M0.1b games asked for: 15 of 84 ended with the bot blinded down below 2 BB at 3-4
+   players, and it lost chips at every depth under 20 BB.
+3. **A big call (≥ 40% of our stack).**
    - *3-4 players alive*: ICM. Malmuth-Harville tournament equity with the payouts that
-     CodinGame's placement-only TrueSkill implies, (1, .5, 0) and (1, .644, .356, 0). It compares
+     CodinGame's placement-only TrueSkill implies, (1, .5, 0) and (1, .644, .356, 0), with a bust
+     paid at its place (M0.1b paid it 0, which made the bot too tight calling off 4-handed). It compares
      EV(call) = e·ICM(win) + (1 − e)·ICM(lose) with ICM(fold), with the pot capped at what we can
      actually win. This is what stops the bot taking 160 BB coin flips while two other bots are
      busy busting each other.
    - *Heads-up*: chips are tournament equity, so pot odds, plus a margin rising to 0.04 at ≥ 50 BB
      deep (the option value of waiting for a better spot).
-3. **Facing a smaller bet**: raise pot-sized with equity > 0.75 against the range; call with
+4. **Facing a smaller bet**: raise pot-sized with equity > 0.75 against the range; call with
    equity > odds + 0.02; else fold.
-4. **Unopened preflop, not in the BB**: open to 2.5 BB with equity > 0.50 (+0.03 per extra
+5. **Unopened preflop, not in the BB**: open to 2.5 BB with equity > 0.50 (+0.03 per extra
    opponent), else complete if the cheap call is priced, else fold.
-5. **Checked to**: bet 0.6 pot with equity > 0.55 (+0.04 per extra opponent), else check. The
+6. **Checked to**: bet 0.6 pot with equity > 0.55 (+0.04 per extra opponent), else check. The
    threshold was 0.62; against passive tables the bot was checking down winners.
 
 ## 7. Output mapping
@@ -143,8 +153,8 @@ shoves. The arena's paired test caught it before it went live.
 
 - No solved postflop strategy: the postflop rules are heuristics around equity-vs-range. M2
   replaces them with a CFR-solved heads-up game at 8-30 BB, which is where most games are decided.
-- Push/fold with 3-4 players is not solved with ICM yet (M1); multiway, the ICM calculation also
-  approximates side pots.
+- Multiway, the big-call ICM rule approximates side pots; the push/fold chart settles them exactly
+  but models everyone as jam-or-fold, so a short stack facing a min-raise gets the heuristics.
 - The flop/turn range ranking ignores draws.
 - No mixing: the rules are deterministic given the cards, which a strong opponent could exploit.
   Equilibrium strategies mix.

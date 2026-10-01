@@ -23,10 +23,10 @@ PYTHON ?= python3
 JOBS ?= 8
 CACHE := data/cache
 
-.PHONY: all full submodule replayer validate validate-sim validate-java reconstruct cache preeq-check \
+.PHONY: all full submodule pfn-tables bot-test replayer validate validate-sim validate-java reconstruct cache preeq-check \
         solvers-check eq169-check cpp-test engine-check bot arena pf-tables freeze clean
 
-all: replayer validate reconstruct cache preeq-check solvers-check cpp-test engine-check bot arena
+all: replayer validate reconstruct cache preeq-check solvers-check cpp-test engine-check bot-test bot arena
 full: all eq169-check
 
 submodule:
@@ -74,6 +74,22 @@ arena:
 
 pf-tables:
 	$(PYTHON) solvers/export_pf.py
+
+# 3-4 player ICM push/fold charts: equity/card-removal tables (1 min), the solver's HU check, the stack grids
+# (about 1.5 h on 4 cores, see solvers/pfn/run_grids.sh) and the distilled header bot/pfn_tables.hpp
+pfn-tables:
+	@mkdir -p build/pfn data/cache/pfn
+	g++ -std=gnu++20 -O3 -march=native -pthread -o build/pfn/tables solvers/pfn/tables.cpp
+	g++ -std=gnu++20 -O3 -march=native -pthread -o build/pfn/pfn solvers/pfn/pfn.cpp
+	test -s data/cache/pfn/eq3.bin || build/pfn/tables 2000 data/cache/pfn
+	build/pfn/pfn test
+	sh solvers/pfn/run_grids.sh
+	$(PYTHON) solvers/pfn/distil.py
+
+bot-test:
+	@mkdir -p build/bot
+	g++ -std=gnu++20 -O2 -o build/bot/test_bot bot/test_bot.cpp
+	build/bot/test_bot
 
 freeze:
 	$(PYTHON) arena/freeze.py

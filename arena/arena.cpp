@@ -38,17 +38,18 @@ struct Rng {
 };
 
 // ----------------------------------------------------------------------------- agents
-struct Stats { long decisions = 0; double ms_total = 0, ms_max = 0; long trials = 0; int desync = 0; long replaced = 0; };
+struct Stats { long decisions = 0; double ms_total = 0, ms_max = 0; long trials = 0; int desync = 0; long replaced = 0; std::map<std::string, long> tags; };
 
 template <class B, class Bud>
 struct BotAgent : pk::Agent {
-  B b; Bud budget; Stats* st; bool trace = false;
+  B b; Bud budget; Stats* st; bool trace = false; const char* label = "dev";
   bool act(const pk::Obs& o, std::string& out) override {
     auto t0 = Clock::now();
     out = b.act(o, budget, t0);
     double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
     if (trace) fprintf(stderr, "r%d h%d bb%d %s %s pot %d call %d stack %d eq %.3f %s -> %s\n", o.round, o.hand_nb, b.tr.bb, o.cards.c_str(), o.board.c_str(),
                        b.tr.pot, b.tr.call_amount(b.tr.players[b.tr.me]), o.stacks[o.player_id], b.last_equity, b.last_tag.c_str(), out.c_str());
+    st->tags[std::string(label) + ":" + b.last_tag]++;
     st->decisions++; st->ms_total += ms; st->ms_max = std::max(st->ms_max, ms); st->trials += b.last_trials; st->desync += b.tr.desynced;
     return true;
   }
@@ -103,11 +104,12 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
     a->trace = getenv("ARENA_TRACE") != nullptr;
     if (getenv("BOT_JF")) a->b.jamfold_max_bb = atof(getenv("BOT_JF"));
     if (getenv("BOT_SLOW")) a->b.use_fast = false;        // test the table-free evaluator path
+    if (getenv("BOT_PFN")) a->b.pfn_max_bb = atof(getenv("BOT_PFN"));
     return a;
   }
   if (name == "prev") {
     auto* a = new BotAgent<prev::Bot, prev::Budget>();
-    a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed; return a;
+    a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed; a->label = "prev"; return a;
   }
   if (name == "station") return new Station();
   if (name == "jammer") { auto* a = new Jammer(); a->rng = Rng{seed}; a->q = 0.35; return a; }
@@ -243,10 +245,14 @@ int main(int argc, char** argv) {
       pair_dev[(int)(items[k].spec)] = g.pay[ds];
     } else pair_prev[(int)(items[k].spec)] = g.pay[ds];
   }
-  Stats st; for (auto& s : stats) { st.decisions += s.decisions; st.ms_total += s.ms_total; st.ms_max = std::max(st.ms_max, s.ms_max); st.trials += s.trials; st.desync += s.desync; st.replaced += s.replaced; }
+  Stats st; for (auto& s : stats) { st.decisions += s.decisions; st.ms_total += s.ms_total; st.ms_max = std::max(st.ms_max, s.ms_max); st.trials += s.trials; st.desync += s.desync; st.replaced += s.replaced; for (auto& kv : s.tags) st.tags[kv.first] += kv.second; }
   printf("arena: %d games (%zu played incl. rotations%s) in %.1fs on %d threads; %.1f games/s; bot decisions %ld, mean %.2f ms, max %.2f ms, mean trials %.0f, desyncs %d, replaced actions %ld, cancelled %d\n",
          o.games, results.size(), o.pair ? " x2 variants" : "", secs, o.threads, results.size() / secs, st.decisions,
          st.decisions ? st.ms_total / st.decisions : 0, st.ms_max, st.decisions ? (double)st.trials / st.decisions : 0, st.desync, st.replaced, cancelled);
+  if (getenv("ARENA_TAGS")) {                      // decision-tag histogram per bot (dev / prev)
+    std::map<std::string, long> tot; for (auto& kv : st.tags) tot[kv.first.substr(0, kv.first.find(':'))] += kv.second;
+    for (auto& kv : st.tags) printf("  tag %-16s %8ld  %5.1f%%\n", kv.first.c_str(), kv.second, 100.0 * kv.second / tot[kv.first.substr(0, kv.first.find(':'))]);
+  }
   printf("dev: mean payout %.4f over %d games (first place %.1f%%)", dev_pay / dev_games, dev_games, 100.0 * dev_first / dev_games);
   for (auto& kv : by_n) printf("; %dp %.4f (n=%d)", kv.first, kv.second.first / kv.second.second, kv.second.second);
   printf("\n");

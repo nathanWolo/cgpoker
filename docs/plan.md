@@ -169,6 +169,24 @@ deadline on the gcc 11.2 docker gate; the live submission promotes past the lowe
 **Gates:** HU jam/fold exploitability 0 within the jam/fold game (exact best response); the 3-4p
 grid meets the best-response criterion; SPRT against M0; submit.
 
+**M1 status (2026-10-01): built.** `cpp/icm.hpp` (the six ICM unit values, plus bust-order
+payouts for the players alive at hand start; the bot's big-call ICM had been paying a bust 0
+instead of the next place), `bot/test_bot.cpp` (ICM, the HU tables against `pf.py`, the chart
+lookup), and the 3-4-player solver `solvers/pfn/` ([README](../solvers/pfn/README.md)): fictitious
+play on the exact jam/fold game of this referee with ICM leaves, exact card removal for the hands
+that go to showdown, tabulated 3-way outcomes (`eq3`, 2,000 Monte Carlo trials per class triple)
+and bucketed 4-way ones. It reproduces `pf.py` heads-up to the mixed hand. Grids: 343 points for
+3 players (twice: payouts 1/.5/0 and 1/.644/.356) and 1,296 for 4; eps (reach-weighted
+best-response gain) about 3·10⁻⁴ of the pool, so the Ganzfried-Sandholm 0.1% criterion holds with
+margin. Distilled to one class ranking per node and a threshold per grid point: EV loss 1·10⁻⁴ of
+the pool per hand, under the solver's own gap; @@CHARS@@ characters, interpolated in log-stack at
+runtime. The bot uses the chart with 3-4 alive preflop whenever the action so far is only folds
+and jams: always when facing a jam, first in when its own stack is ≤ 12 BB (the same boundary as
+heads-up; tuning by SPRT is open). What the live M0.1b games showed it had to fix: of the 84
+placement games (rank 5/194 after them), 15 ended with the bot blinded down to under 2 BB in
+3-4-player play, and it lost 0.06-0.08 BB per hand at ≤ 20 BB effective while winning 0.9 BB per
+hand above 50 BB. Arena, paired against M0.1b: @@ARENA_M1@@.
+
 ### M2: heads-up 8-30 BB equilibrium (≈2-3 weeks): the core milestone
 
 Nearly every game ends heads-up at a median of 14-18 BB, and that phase decides 1st vs 2nd (§1,
