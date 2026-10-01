@@ -1,0 +1,46 @@
+# Referee classes compiled into the replayer, relative to
+# third_party/CodingamePoker/CodingamePoker/src/main/java (wala-fr/CodingamePoker @ ac30d97).
+# Excluded on purpose: Referee.java, Player.java, input/, view/ (need the CodinGame SDK).
+# A file under replayer/src with the same path overrides the upstream one (none do today).
+com/codingame/model/object/board/WinningCalculator.java
+com/codingame/model/object/board/Board.java
+com/codingame/model/object/enumeration/Suit.java
+com/codingame/model/object/enumeration/ActionType.java
+com/codingame/model/object/enumeration/Rank.java
+com/codingame/model/object/enumeration/Position.java
+com/codingame/model/object/enumeration/BoardStatus.java
+com/codingame/model/object/enumeration/PlayerStatus.java
+com/codingame/model/object/enumeration/HandType.java
+com/codingame/model/object/PlayerModel.java
+com/codingame/model/object/Action.java
+com/codingame/model/object/DealPosition.java
+com/codingame/model/object/FiveCardHand.java
+com/codingame/model/object/ActionInfo.java
+com/codingame/model/object/InvalidMoveException.java
+com/codingame/model/object/Hand.java
+com/codingame/model/object/Deck.java
+com/codingame/model/object/Card.java
+com/codingame/model/variable/Parameter.java
+com/codingame/model/utils/AssertUtils.java
+com/codingame/model/utils/HandUtils.java
+com/codingame/model/utils/MessageUtils.java
+com/codingame/model/utils/CardUtils.java
+com/codingame/model/utils/ActionUtils.java
+com/codingame/model/utils/RandomUtils.java
+com/codingame/game/RefereeParameter.java
+com/codingame/win_percent/skeval/WinPercentUtils.java
+com/codingame/win_percent/skeval/SKPokerEvalConstant.java
+com/codingame/win_percent/skeval/SKPokerEvalUtils.java
+com/codingame/win_percent/skeval/table/hash/RankHash4.java
+com/codingame/win_percent/skeval/table/hash/RankHash3.java
+com/codingame/win_percent/skeval/table/hash/RankHash6.java
+com/codingame/win_percent/skeval/table/hash/RankHash2.java
+com/codingame/win_percent/skeval/table/hash/RankHash5.java
+com/codingame/win_percent/skeval/table/hash/RankHash1.java
+com/codingame/win_percent/skeval/table/FlushRanks.java
+com/codingame/win_percent/skeval/table/FlushCheck.java
+com/codingame/win_percent/skeval/table/RankOffsets.java
+com/codingame/win_percent/skeval/table/RankHash.java
+com/codingame/win_percent/skeval/table/offset/RankOffsets2.java
+com/codingame/win_percent/skeval/table/offset/RankOffsets1.java
+com/codingame/win_percent/naive_eval/WinPercentNaiveUtils.java

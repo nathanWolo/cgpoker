@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pkl
+*.o
+*.class
+build/
+bin/
+# regenerated from data/replays by sim/reconstruct.py
+data/decisions.jsonl
+# decompressed caches
+data/cache/
+# interrupted downloads from tools/fetch_replays.py
+*.part
+.venv/

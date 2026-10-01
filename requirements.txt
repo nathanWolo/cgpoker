@@ -1,0 +1,6 @@
+# Python dependencies (Python 3, tested with 3.11). Everything else is the standard library.
+#   pip install -r requirements.txt
+# On a Debian/Ubuntu system Python (no venv), trueskill 0.4.5's setup.py fails with
+# "AttributeError: install_layout"; use: SETUPTOOLS_USE_DISTUTILS=stdlib pip install -r requirements.txt
+numpy>=1.24        # solvers/*.py, cpp/train_cost.py (README numbers measured with numpy 2.4.6)
+trueskill==0.4.5   # solvers/trueskill_payouts.py only
