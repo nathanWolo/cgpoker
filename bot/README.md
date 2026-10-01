@@ -40,7 +40,7 @@ postflop street, solved by MCCFR at 7 stack points and interpolated. `hu_play.hp
 onto the tree (the tracker now logs every action of the hand), computes our bucket, and samples the
 action: the strategy is mixed. Off-tree histories (a 4-bet, a timeout) and everything else fall through
 to the rules below. `hu_max_bb` (env `BOT_HU`, 0 disables) is the upper gate; above 30 BB the 30 BB
-tables are used. Arena, paired against M1: @@ARENA_M2@@.
+tables are used. Arena, paired against M1: **+0.020 ± 0.005 payout per game in 2-player games** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,551 games: 3-4-player games reach heads-up late and short, where M1 already played jam/fold); against M0.1b over all sizes +0.035 ± 0.004.
 
 ## Policy (M1)
 

@@ -238,7 +238,7 @@ to jam/fold. Shipped as 4-bit probabilities for every node (24k characters; the 
 tree from the rules and checks a hash). Not yet done from the list above: the postflop policy net
 (not needed, the tables fit), pseudo-harmonic action translation (a fixed 60%-of-stack rule maps
 raises to all-in), the river re-solve, and local best response in the real game. Arena, paired
-against M1: @@ARENA_M2@@.
+against M1: **+0.020 ± 0.005 payout per game in 2-player games** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,551 games: 3-4-player games reach heads-up late and short, where M1 already played jam/fold); against M0.1b over all sizes +0.035 ± 0.004.
 
 ### M3: 3-4-player deep play (≈2 weeks)
 

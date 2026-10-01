@@ -1,5 +1,5 @@
 #pragma once
-// bot_prev.hpp - FROZEN copy of bot/bot.hpp made by arena/freeze.py; do not edit.
+// bot_prev.hpp - FROZEN copy of bot/bot.hpp at M1 (commit 40d4864) made by arena/freeze.py; do not edit.
 // Namespaces renamed (bot -> prev, pf -> pf_prev) so the arena can hold both versions.
 // pf_rank.hpp - preflop class strength: PF_PCT[c] = share of all 1,326 combos whose class is at least as
 // strong as class c, by mean equity against a random hand (solvers/eq169.bin, combo-weighted).
@@ -42,6 +42,9 @@ const unsigned short PF_CALL[169] = {1023, 1, 1, 1, 1, 1, 1, 3, 3, 7, 15, 127, 2
 #include <cstdint>
 #include <string>
 
+#include "../cpp/eval7_slow.hpp"
+#include "../cpp/icm.hpp"
+#include "pfn_tables.hpp"
 #include "../cpp/pe7c.hpp"
 #include "../engine/tracker.hpp"
 
@@ -73,6 +76,66 @@ inline int hand_class(int c0, int c1) {
   return (c0 & 3) == (c1 & 3) ? hi * 13 + lo : lo * 13 + hi;
 }
 
+// ---- ICM push/fold charts for 3-4 players (bot/pfn_tables.hpp, solved by solvers/pfn): decoded once per process
+struct PfnGame {
+  int N = 0, nt = 0, L = 0, nn = 0, P = 0;
+  const double* lv = nullptr; const int* nodes = nullptr;
+  std::vector<unsigned char> rank, pos, thr;   // rank[node][169]; pos[node][class] = rank position; thr[node][P]
+};
+// 14 payload bits per CJK character (tools/cjk14.py); other characters are skipped
+inline int cjk14_decode(const char* s, unsigned char* out, int out_max) {
+  int n = 0, bits = 0; unsigned acc = 0;
+  for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+    if ((*p & 0xF0) != 0xE0) continue;
+    unsigned code = ((p[0] & 15u) << 12) | ((p[1] & 63u) << 6) | (p[2] & 63u);
+    p += 2;
+    acc = (acc << 14) | (code - 0x4E00u); bits += 14;
+    while (bits >= 8) { if (n >= out_max) return -1; bits -= 8; out[n++] = (unsigned char)(acc >> bits); }
+    acc &= (1u << bits) - 1;
+  }
+  return n;
+}
+inline const std::vector<PfnGame>& pfn_games() {
+  static const std::vector<PfnGame> G = [] {
+    std::vector<PfnGame> v;
+    for (int gi = 0; gi < pfn_t::NG; gi++) {
+      const pfn_t::GameT& t = pfn_t::GAMES[gi];
+      PfnGame g; g.N = t.N; g.nt = t.nt; g.L = t.L; g.nn = t.nn; g.lv = t.levels; g.nodes = t.nodes;
+      g.P = 1; for (int i = 0; i < g.N; i++) g.P *= g.L;
+      int need = g.nn * 169 + g.nn * g.P;
+      std::vector<unsigned char> buf(need + 2);
+      if (cjk14_decode(t.data, buf.data(), (int)buf.size()) < need) continue;   // corrupt: chart unusable
+      g.rank.assign(buf.begin(), buf.begin() + g.nn * 169);
+      g.thr.assign(buf.begin() + g.nn * 169, buf.begin() + need);
+      g.pos.assign(g.nn * 169, 0);
+      for (int k = 0; k < g.nn; k++) for (int r = 0; r < 169; r++) g.pos[k * 169 + g.rank[k * 169 + r]] = (unsigned char)r;
+      v.push_back(std::move(g));
+    }
+    return v;
+  }();
+  return G;
+}
+// number of classes to jam at node k for stacks st[0..N) (BB, action order): multilinear in log-stack between levels
+inline double pfn_threshold(const PfnGame& g, int k, const double* st) {
+  int lo[4]; double fr[4];
+  for (int i = 0; i < g.N; i++) {
+    double s = std::min(std::max(st[i], g.lv[0]), g.lv[g.L - 1]);
+    int j = 0; while (j + 2 < g.L && g.lv[j + 1] <= s) j++;
+    lo[i] = j; fr[i] = (std::log(s) - std::log(g.lv[j])) / (std::log(g.lv[j + 1]) - std::log(g.lv[j]));
+  }
+  double T = 0;
+  for (int c = 0; c < (1 << g.N); c++) {
+    double w = 1; int idx = 0;
+    for (int i = 0; i < g.N; i++) { int bit = c >> i & 1; w *= bit ? fr[i] : 1 - fr[i]; idx = idx * g.L + lo[i] + bit; }
+    if (w > 0) T += w * g.thr[k * g.P + idx];
+  }
+  return T;
+}
+inline const PfnGame* pfn_find(int N, int nt) {
+  for (const PfnGame& g : pfn_games()) if (g.N == N && g.nt == nt) return &g;
+  return nullptr;
+}
+
 class Bot {
  public:
   pk::Tracker tr;
@@ -82,7 +145,27 @@ class Bot {
   double last_equity = 0;
   std::string last_tag;
   long decisions = 0, trials_total = 0;
+  bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
   double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
+  double pfn_max_bb = 20;                 // 3-4 players, preflop: the ICM push/fold chart decides first-in, over limps and against a raise up to this stack (BB); 20 beat 12 in the arena
+
+  // table-free value of the best 5 of k (5..7) cards
+  static uint32_t slow_partial(const int* c, int k) {
+    if (k == 7) return e7::ev7(c);
+    uint32_t best = 0; int five[5];
+    if (k == 5) return pk::eval5(c);
+    for (int skip = 0; skip < 6; skip++) {                 // k == 6
+      int q = 0; for (int i = 0; i < 6; i++) if (i != skip) five[q++] = c[i];
+      best = std::max(best, pk::eval5(five));
+    }
+    return best;
+  }
+  __attribute__((always_inline)) inline uint32_t ev7(const int* c) const {
+    if (!use_fast) return e7::ev7(c);
+    pe::H h = pe::E;
+    for (int i = 0; i < 7; i++) h = pe::add(h, c[i]);
+    return pe::ev(h);
+  }
 
   // Our share of the pot at showdown against n_opp uniformly random hands, given the known board.
   double equity(const int* hole, const int* board, int n_board, int n_opp, const Budget& b, Clock::time_point t0) {
@@ -95,23 +178,23 @@ class Bot {
       for (int i = 0; i < nu; i++) u |= used[i] == c;
       if (!u) deck[nd++] = c;
     }
-    pe::H base = pe::E;
-    for (int i = 0; i < n_board; i++) base = pe::add(base, board[i]);
-    pe::H mine = pe::add(pe::add(base, hole[0]), hole[1]);
     int need = 5 - n_board + 2 * n_opp;
+    int c7[7];
+    for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
     double share = 0;
     int trials = 0;
     for (;;) {
       for (int t = 0; t < 512; t++, trials++) {
         // partial Fisher-Yates for `need` cards
         for (int i = 0; i < need; i++) { int j = i + rng.below(nd - i); int tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp; }
-        pe::H bd = base, me = mine;
-        for (int i = 0; i < 5 - n_board; i++) bd = pe::add(bd, deck[i]), me = pe::add(me, deck[i]);
-        uint16_t mv = pe::ev(me);
+        for (int i = n_board; i < 5; i++) c7[2 + i] = deck[i - n_board];
+        c7[0] = hole[0]; c7[1] = hole[1];
+        uint32_t mv = ev7(c7);
         int better = 0, tie = 0;
         for (int o = 0; o < n_opp; o++) {
           int k = 5 - n_board + 2 * o;
-          uint16_t ov = pe::ev(pe::add(pe::add(bd, deck[k]), deck[k + 1]));
+          c7[0] = deck[k]; c7[1] = deck[k + 1];
+          uint32_t ov = ev7(c7);
           if (ov > mv) { better = 1; break; }
           tie += ov == mv;
         }
@@ -126,32 +209,13 @@ class Bot {
     return share / trials;
   }
 
-  // ---- tournament equity: Malmuth-Harville ICM over the players who still have chips
-  static double icm_rec(const double* st, int k, double total, int depth, const double* pay, int me_idx, bool* used) {
-    // probability-weighted payout for player me_idx; depth = place being assigned
-    double v = 0;
-    for (int i = 0; i < k; i++) {
-      if (used[i] || st[i] <= 0) continue;
-      double p = st[i] / total;
-      if (i == me_idx) v += p * pay[depth];
-      else if (depth + 1 < k) {
-        used[i] = true;
-        v += p * icm_rec(st, k, total - st[i], depth + 1, pay, me_idx, used);
-        used[i] = false;
-      }
-    }
-    return v;
-  }
-  // stacks[0..n) (0 = busted); returns the tournament equity of seat `seat` in payout units
-  static double icm(const double* stacks, int n, int seat) {
-    static const double pay2[] = {1, 0}, pay3[] = {1, .5, 0}, pay4[] = {1, .6444, .3556, 0};
-    const double* pay = n == 2 ? pay2 : n == 3 ? pay3 : pay4;
-    double total = 0; int alive = 0;
-    for (int i = 0; i < n; i++) total += stacks[i] > 0 ? stacks[i] : 0, alive += stacks[i] > 0;
-    if (stacks[seat] <= 0 || alive == 0) return 0;
-    if (alive == 1) return pay[0];
-    bool used[4] = {false, false, false, false};
-    return icm_rec(stacks, n, total, 0, pay, seat, used);
+  // tournament equity (cpp/icm.hpp: Malmuth-Harville with the TrueSkill payouts) of `seat` for the hypothetical
+  // end-of-hand stacks v[0..n) over all seats; seats that busted in earlier hands (alive_start false) are left
+  // out so that a seat busting now takes the right place
+  static double icm_of(const double* v, const bool* alive_start, int n, int seat) {
+    double c[4]; int m = 0, me = 0;
+    for (int i = 0; i < n; i++) if (alive_start[i]) { if (i == seat) me = m; c[m++] = v[i]; }
+    return icm::icm(c, m, me, n);
   }
 
   // Opponent combos ranked by made-hand strength on the board (preflop: by PF_PCT100).  Fills
@@ -162,12 +226,18 @@ class Bot {
     for (int i = 0; i < n_board; i++) used[board[i]] = true;
     static thread_local int combo[1326][2]; static thread_local int key[1326]; static thread_local int idx[1326];
     int m = 0;
-    pe::H base = pe::E;
-    for (int i = 0; i < n_board; i++) base = pe::add(base, board[i]);
+    int c7[7]; for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
     for (int a = 0; a < 52; a++) if (!used[a])
       for (int c = a + 1; c < 52; c++) if (!used[c]) {
         combo[m][0] = a; combo[m][1] = c;
-        key[m] = n_board >= 3 ? (int)pe::ev(pe::add(pe::add(base, a), c)) : 100 - pf_prev::PF_PCT100[hand_class(a, c)];
+        if (n_board >= 3) {                                // made-hand rank on the known board (5-7 cards)
+          c7[0] = a; c7[1] = c;
+          if (n_board == 5) key[m] = (int)ev7(c7);
+          else {                                           // flop/turn: rank by the best 5-of-(2+n_board) cards
+            pe::H h = pe::E; for (int i = 0; i < 2 + n_board; i++) h = pe::add(h, c7[i]);
+            key[m] = use_fast ? (int)pe::ev(h) : (int)slow_partial(c7, 2 + n_board);
+          }
+        } else key[m] = 100 - pf_prev::PF_PCT100[hand_class(a, c)];
         idx[m] = m; m++;
       }
     std::sort(idx, idx + m, [&](int x, int y) { return key[x] > key[y]; });
@@ -182,9 +252,8 @@ class Bot {
     bool used[52] = {false};
     used[hole[0]] = used[hole[1]] = true;
     for (int i = 0; i < n_board; i++) used[board[i]] = true;
-    pe::H base = pe::E;
-    for (int i = 0; i < n_board; i++) base = pe::add(base, board[i]);
-    pe::H mine = pe::add(pe::add(base, hole[0]), hole[1]);
+    int c7[7];
+    for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
     double share = 0; int trials = 0;
     int oh[3][2];
     for (;;) {
@@ -210,12 +279,13 @@ class Bot {
         }
         int need = 5 - n_board;
         for (int i = 0; i < need; i++) { int j = i + rng.below(nd - i); int tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp; }
-        pe::H bd = base, me = mine;
-        for (int i = 0; i < need; i++) bd = pe::add(bd, deck[i]), me = pe::add(me, deck[i]);
-        uint16_t mv = pe::ev(me);
+        for (int i = n_board; i < 5; i++) c7[2 + i] = deck[i - n_board];
+        c7[0] = hole[0]; c7[1] = hole[1];
+        uint32_t mv = ev7(c7);
         int better = 0, tie = 0;
         for (int o = 0; o < n_opp; o++) {
-          uint16_t ov = pe::ev(pe::add(pe::add(bd, oh[o][0]), oh[o][1]));
+          c7[0] = oh[o][0]; c7[1] = oh[o][1];
+          uint32_t ov = ev7(c7);
           if (ov > mv) { better = 1; break; }
           tie += ov == mv;
         }
@@ -275,7 +345,7 @@ class Bot {
     for (auto& p : tr.players) if (p.id != tr.me) winnable += std::min(p.total, my_commit);
     double odds = call_amt > 0 ? call_amt / winnable : 0;
 
-    // ---- heads-up preflop at <= 25 BB: jam/fold Nash (chip EV).  SB first in: jam or fold.  BB facing a jam: call or fold.
+    // ---- heads-up preflop at <= jamfold_max_bb: jam/fold Nash (chip EV).  SB first in: jam or fold.  BB facing a jam: call or fold.
     if (preflop && alive == 2 && live == 2 && eff_bb <= jamfold_max_bb) {
       int k = 0;
       for (int i = 1; i < pf_prev::PF_NS; i++)
@@ -289,6 +359,43 @@ class Bot {
       if (tr.me == tr.bb_id && opp && opp->allin && call > 0) {
         last_tag = "pf-bb"; last_equity = -1; last_trials = 0;
         return (pf_prev::PF_CALL[cls] >> k & 1) ? call_s() : "FOLD";
+      }
+    }
+
+    // ---- 3-4 players preflop, jam/fold history so far: the ICM push/fold chart (pfn_tables.hpp).  Facing a jam
+    // always; first in when our stack is short.  Any limp or raise before us is off the chart's tree.
+    if (preflop && (alive == 3 || alive == 4) && (can_raise || can_allin || call > 0)) {
+      int order[4], no = 0;                             // action order: after the BB round to the BB; alive seats only
+      for (int s = 1; s <= n; s++) { int id = (tr.bb_id + s) % n; if (tr.players[id].stack + tr.players[id].total > 0) order[no++] = id; }
+      int mi = -1; for (int j = 0; j < no; j++) if (order[j] == tr.me) mi = j;
+      bool ontree = mi >= 0 && no == alive, raised = false, shortie = (double)my_start / bb <= pfn_max_bb; int prefix = 0, limpers = 0;
+      for (int j = 0; j < mi && ontree; j++) {
+        const pk::Player& p = tr.players[order[j]];
+        if (p.folded) continue;
+        if (p.allin || (prefix != 0 && p.rnd > bb)) prefix |= 1 << j;   // a jam, or a call of one by a bigger stack
+        else if (prefix == 0 && p.rnd <= bb) limpers++;                 // a limp: the chart has no limp node, count it as a fold
+        else if (shortie && !raised && p.rnd > bb) { raised = true; prefix |= 1 << j; }   // a raise: short, we answer it jam or fold, as if it were a jam
+        else ontree = false;                                            // a raise while we are deep: off the chart's tree
+      }
+      for (int j = mi + 1; j < no && ontree; j++) if (tr.players[order[j]].spoken) ontree = false;
+      const PfnGame* g = ontree ? pfn_find(alive, n) : nullptr;
+      bool facing_jam = prefix != 0;
+      // a jam much shorter than our stack with players still to act behind us is not the chart's "call" (which
+      // commits our whole stack): the pot-odds rules below price that
+      bool small_call = facing_jam && !raised && call_amt < 0.4 * stack && mi + 1 < no;
+      if (g && !small_call && (facing_jam || shortie)) {
+        int nd = (1 << mi) - 1 + prefix, k = -1;
+        for (int q = 0; q < g->nn; q++) if (g->nodes[q] == nd) k = q;
+        if (k >= 0) {
+          double st[4]; for (int j = 0; j < no; j++) st[j] = (double)(tr.players[order[j]].stack + tr.players[order[j]].total) / bb;
+          double T = pfn_threshold(*g, k, st);
+          bool go = g->pos[k * 169 + cls] + 0.5 < T;
+          last_tag = raised ? "pfn-rejam" : facing_jam ? "pfn-call" : limpers ? "pfn-jam-lim" : "pfn-jam"; last_equity = -1; last_trials = 0;
+          if (go) return facing_jam && !raised ? call_s() : can_allin ? "ALL-IN" : bet(stack);
+          if (can_check) return "CHECK";                                // the BB's free option is never folded
+          if (facing_jam || !limpers) return "FOLD";
+          // chart says fold over limpers: completing is cheap, let the rules below price it
+        }
       }
     }
 
@@ -339,7 +446,8 @@ class Bot {
           if (big_opp >= 0) l[big_opp] = st[big_opp] + my_commit;
           double f[4]; for (int i = 0; i < n; i++) f[i] = st[i]; f[tr.me] = stack;   // fold: our chips in the pot are gone
           if (big_opp >= 0) f[big_opp] += me.total;
-          double ev_call = e * icm(w, n, tr.me) + (1 - e) * icm(l, n, tr.me), ev_fold = icm(f, n, tr.me);
+          bool as[4]; for (int i = 0; i < n; i++) as[i] = st[i] > 0;
+          double ev_call = e * icm_of(w, as, n, tr.me) + (1 - e) * icm_of(l, as, n, tr.me), ev_fold = icm_of(f, as, n, tr.me);
           last_tag = "icm";
           return ev_call > ev_fold + 0.002 ? call_s() : "FOLD";
         }
