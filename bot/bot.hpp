@@ -273,7 +273,7 @@ class Bot {
     for (auto& p : tr.players) if (p.id != tr.me) winnable += std::min(p.total, my_commit);
     double odds = call_amt > 0 ? call_amt / winnable : 0;
 
-    // ---- heads-up preflop at <= 25 BB: jam/fold Nash (chip EV).  SB first in: jam or fold.  BB facing a jam: call or fold.
+    // ---- heads-up preflop at <= jamfold_max_bb: jam/fold Nash (chip EV).  SB first in: jam or fold.  BB facing a jam: call or fold.
     if (preflop && alive == 2 && live == 2 && eff_bb <= jamfold_max_bb) {
       int k = 0;
       for (int i = 1; i < pf::PF_NS; i++)

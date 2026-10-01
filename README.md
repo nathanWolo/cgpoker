@@ -112,6 +112,7 @@ Details and provenance in the linked docs; each number names the script that rep
 
 ## Documents
 
+- [`docs/bot_overview.md`](docs/bot_overview.md): how the current bot works end to end: pipeline, tracker, evaluators, Monte Carlo, beliefs, decision rules, output mapping, constraints.
 - [`docs/plan.md`](docs/plan.md): the equilibrium-first build plan: milestones and gates, per-turn algorithm, how equilibrium quality is measured, character budget, risks.
 - [`docs/open_questions.md`](docs/open_questions.md): the open questions (Q-A1 ... Q-H3) that the plan references.
 - [`docs/ataraxos.md`](docs/ataraxos.md): the Ataraxos paper (Nature 2026) explained, and what transfers to poker.
