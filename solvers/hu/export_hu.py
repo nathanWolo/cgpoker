@@ -1,6 +1,6 @@
 """Export the heads-up MCCFR solution (solvers/hu/hu.cpp `grid`) as bot/hu_tables.hpp.
 
-    python3 solvers/hu/export_hu.py [--grid data/hu/grid.bin] [--out bot/hu_tables.hpp]
+    python3 solvers/hu/export_hu.py [--grid data/hu/grid.bin [data/hu/grid_deep.bin]] [--out bot/hu_tables.hpp]
 
 Per stack point and decision node (full action history, perfect recall) the average strategy over the
 node's buckets (169 preflop classes, NB EHS buckets postflop) is quantised to 4 bits per action
@@ -46,10 +46,15 @@ def load_grid(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid", default=os.path.join(REPO, "data", "hu", "grid.bin"))
+    ap.add_argument("--grid", nargs="+", default=[os.path.join(REPO, "data", "hu", "grid.bin")], help="one or more grid files; their stacks are merged and sorted")
     ap.add_argument("--out", default=os.path.join(REPO, "bot", "hu_tables.hpp"))
     a = ap.parse_args()
-    thr, stacks = load_grid(a.grid)
+    thr, stacks = None, []
+    for path in a.grid:
+        t, st = load_grid(path)
+        assert thr is None or np.allclose(t, thr), "grids from different pools"
+        thr = t; stacks += st
+    stacks.sort(key=lambda x: x[0])
     # the tree is the same shape for every stack point except where raises collapse into all-ins at short
     # stacks, so each stack carries its own node list; the bot finds a node by (stack index, history)
     # the bot rebuilds the tree from the same rules (bot/hu_play.hpp, HuTree); a node count and an FNV-1a hash of

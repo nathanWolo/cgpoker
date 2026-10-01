@@ -93,11 +93,11 @@ The range sampler draws each opponent's hand from the range, rejecting card conf
 
 In order:
 
-1. **Heads-up at 8-40 BB effective: the solved game.** Preflop and every postflop street come from
+1. **Heads-up at 8-150 BB effective: the solved game.** Preflop and every postflop street come from
    one MCCFR solution of an abstract heads-up game (`solvers/hu/`, [README](../solvers/hu/README.md)):
    fold / limp / raise / all-in preflop, check / half-pot bet / all-in postflop, 169 preflop classes
-   and 10 buckets per postflop street by expected showdown equity, solved at 7 stack points and
-   interpolated. The tracker logs every action of the hand; `bot/hu_play.hpp` maps them onto the
+   and 10 buckets per postflop street by expected showdown equity, solved at 9 stack points from 8 to
+   120 BB and interpolated (the 120 BB tables beyond). The tracker logs every action of the hand; `bot/hu_play.hpp` maps them onto the
    tree's history, computes our bucket (300 runouts, exact on the river), and *samples* the action
    from the node's probabilities, so the strategy is mixed as an equilibrium is. A history the tree
    lacks (a 4-bet) falls through to the rules below. Below 8 BB the heads-up jam/fold Nash of
@@ -158,7 +158,7 @@ shoves. The arena's paired test caught it before it went live.
 
 ## 9. What it does not do yet
 
-- Postflop with 3-4 players, and heads-up above 40 BB, is still heuristics around equity-vs-range.
+- Postflop with 3-4 players is still heuristics around equity-vs-range.
   The heads-up solution's abstraction is coarse: one bet size besides all-in, no non-all-in raises
   postflop, equity buckets that do not tell a draw from a made hand of the same equity.
 - Multiway, the big-call ICM rule approximates side pots; the push/fold chart settles them exactly

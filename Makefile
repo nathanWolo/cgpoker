@@ -23,7 +23,7 @@ PYTHON ?= python3
 JOBS ?= 8
 CACHE := data/cache
 
-.PHONY: all full submodule pfn-tables bot-test replayer validate validate-sim validate-java reconstruct cache preeq-check \
+.PHONY: all full submodule pfn-tables hu-tables bot-test replayer validate validate-sim validate-java reconstruct cache preeq-check \
         solvers-check eq169-check cpp-test engine-check bot arena pf-tables freeze clean
 
 all: replayer validate reconstruct cache preeq-check solvers-check cpp-test engine-check bot-test bot arena
@@ -85,6 +85,15 @@ pfn-tables:
 	build/pfn/pfn test
 	sh solvers/pfn/run_grids.sh
 	$(PYTHON) solvers/pfn/distil.py
+
+# heads-up 8-120 BB strategy: the 2M-deal pool (30 s), nine stack points by MCCFR (about 20 min on 4 cores),
+# the exported header bot/hu_tables.hpp
+hu-tables:
+	@mkdir -p build/hu data/cache/hu data/hu
+	g++ -std=gnu++20 -O3 -march=native -pthread -o build/hu/hu solvers/hu/hu.cpp
+	test -s data/cache/hu/pool.bin || build/hu/hu pool 2000000 1 data/cache/hu/pool.bin
+	build/hu/hu grid 8,10,12,15,20,30,40,60,120 400000000 data/hu/grid9.bin data/cache/hu/pool.bin
+	$(PYTHON) solvers/hu/export_hu.py --grid data/hu/grid9.bin
 
 bot-test:
 	@mkdir -p build/bot

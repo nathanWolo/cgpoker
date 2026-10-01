@@ -1,6 +1,6 @@
-# solvers/hu: heads-up 8-30 BB by MCCFR
+# solvers/hu: heads-up 8-120 BB by MCCFR
 
-The strategy the bot plays heads-up at 8-40 BB effective (M2 of [`docs/plan.md`](../../docs/plan.md)):
+The strategy the bot plays heads-up at 8-150 BB effective (M2 of [`docs/plan.md`](../../docs/plan.md)):
 preflop and all three postflop streets, from one solve of an abstract no-limit game.
 
 | file | what |
@@ -11,8 +11,8 @@ preflop and all three postflop streets, from one solve of an abstract no-limit g
 
 ```sh
 build/hu/hu pool 2000000 1 data/cache/hu/pool.bin          # 30 s
-build/hu/hu grid 8,10,12,15,20,25,30 150000000 data/hu/grid.bin data/cache/hu/pool.bin   # @@GRIDTIME@@
-python3 solvers/hu/export_hu.py
+build/hu/hu grid 8,10,12,15,20,30,40,60,120 400000000 data/hu/grid9.bin data/cache/hu/pool.bin   # about 20 min on 4 cores (make hu-tables)
+python3 solvers/hu/export_hu.py --grid data/hu/grid9.bin
 ```
 
 ## The game
@@ -39,7 +39,7 @@ opponent's real sizes are mapped onto these (a raise of 60% of the stack or more
 External-sampling MCCFR: each iteration samples one deal from the pool and walks the tree for one
 player, trying every action at that player's nodes and sampling the other's; regrets are clipped at
 zero and the average strategy is weighted linearly in the iteration count. 150M iterations per stack
-point, about @@ITERTIME@@.
+point, about 100 s per stack point alone (3 min for the seven together); deeper stacks have bigger trees and converge more slowly, so they would profit from more.
 
 **Exploitability** is measured by best response: for each player, the response to the other's average
 strategy is fitted on 1M deals of the pool and valued on the other 1M. A response fitted and valued
@@ -48,15 +48,21 @@ sets), one valued out of sample understates it, so both are reported; the truth 
 
 | stack | SB value (BB/hand) | exploitability out-of-sample / in-sample (BB/hand) |
 |---|---|---|
-@@GRIDTABLE@@
+| 8 | +0.016 | 0.003 / 0.014 |
+| 15 | +0.023 | 0.012 / 0.032 |
+| 20 | +0.037 | 0.014 / 0.039 |
+| 30 | +0.071 | 0.017 / 0.056 |
 
 For reference, the SB's value when restricted to jam or fold (`pf.py`) is −0.045 BB/hand at 10 BB,
 −0.08 at 12 BB, −0.13 at 15 BB and −0.18 at 20 BB: the unrestricted game is worth 0.05-0.2 BB/hand
 more to the SB (the plan's Q-D1).
 
+Deeper stacks (`data/hu/grid_deep.bin`, 40-120 BB at 150M iterations) were tested against the
+8-30 BB tables in the arena before the 9-stack solve: see the M2.1 note in `docs/plan.md`.
+
 ## What the bot does with it (`bot/hu_play.hpp`)
 
-Heads-up with 8-40 BB effective at the start of the hand, the hand so far is mapped onto the tree's
+Heads-up with 8-150 BB effective at the start of the hand, the hand so far is mapped onto the tree's
 history (the tracker logs every action of the hand), our bucket is the preflop class or the EHS of
 our hand on the board (300 runouts, exact on the river, about 50 µs), the node at the two nearest
 stack points gives action probabilities that are interpolated in stack, and the action is sampled:

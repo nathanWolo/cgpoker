@@ -240,6 +240,19 @@ tree from the rules and checks a hash). Not yet done from the list above: the po
 raises to all-in), the river re-solve, and local best response in the real game. Arena, paired
 against M1: **+0.020 ± 0.005 payout per game in 2-player games** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,551 games: 3-4-player games reach heads-up late and short, where M1 already played jam/fold); against M0.1b over all sizes +0.035 ± 0.004.
 
+**M2.1 (same night): deeper stacks and more iterations.** Solving 40/60/80/120 BB too and playing the
+tables up to 150 BB effective (the deepest tables beyond) gave, against M1 in 2-player games, +0.045 ±
+0.006 payout per game with 11 stack points at 150M iterations (against +0.020 for the 8-30 BB tables
+gated at 40 BB, and +0.027 gated at 60), and +0.008 ± 0.003 over all sizes. The shipped version is
+9 stack points (8, 10, 12, 15, 20, 30, 40, 60, 120 BB) at 400M iterations, 32,805 characters of
+tables; the submission is 91,412 characters of the 100k cap. Against M2 (the 8-30 BB version): **+0.025 ± 0.006 payout per 2-player game** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,470 games; the gain is in heads-up play, which 3-4-player games reach late and short).
+The abstraction is the same coarse one deep (half-pot bets and all-in raises only), so deep heads-up
+play is now equilibrium-shaped but crude; a second bet size and non-all-in raises are the next step
+once the table budget allows (merging postflop nodes by pot and stack-to-pot ratio, or 3-bit
+probabilities). M3.1, a 3-4-player preflop solve at 20-100 BB with equity-realisation leaves, was
+built (`solvers/pfd/`) but not shipped: its leaf model makes it limp half its hands at 20-30 BB and
+the live games showed no leak at those depths ([pfd/README.md](../solvers/pfd/README.md)).
+
 ### M3: 3-4-player deep play (≈2 weeks)
 
 1. **Preflop charts** for N = 3, 4 by position × facing action × stack bucket (15-150 BB), for this

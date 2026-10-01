@@ -114,6 +114,7 @@ class Bot {
  public:
   pk::Tracker tr;
   Rng rng{0x1234567ull};
+  uint64_t seed0 = 0x1234567ull;          // per-process seed (the arena varies it per game); each turn reseeds from it
   // diagnostics of the last decision
   int last_trials = 0;
   double last_equity = 0;
@@ -121,7 +122,7 @@ class Bot {
   long decisions = 0, trials_total = 0;
   bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
   double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
-  double hu_max_bb = 40;                  // heads-up: the solved 8-30 BB strategy (hu_play.hpp) up to this effective stack; above 30 the 30 BB tables
+  double hu_max_bb = 150;                 // heads-up: the solved 8-120 BB strategy (hu_play.hpp) up to this effective stack; beyond the last stack point its tables
   double pfn_max_bb = 20;                 // 3-4 players, preflop: the ICM push/fold chart decides first-in, over limps and against a raise up to this stack (BB); 20 beat 12 in the arena
 
   // table-free value of the best 5 of k (5..7) cards
@@ -260,8 +261,8 @@ class Bot {
     for (int a = 0; a < 52; a++) if (!used[a])
       for (int c = a + 1; c < 52; c++) if (!used[c]) {
         combo[m][0] = a; combo[m][1] = c;
-        if (n_board >= 3) {                                // made-hand rank on the known board (5-7 cards)
-          c7[0] = a; c7[1] = c;
+        if (n_board >= 3) {                                // made-hand rank on the known board (5-7 cards); ranking by
+          c7[0] = a; c7[1] = c;                            // expected hand strength instead measured +0.000 +- 0.003 (M2.1)
           if (n_board == 5) key[m] = (int)ev7(c7);
           else {                                           // flop/turn: rank by the best 5-of-(2+n_board) cards
             pe::H h = pe::E; for (int i = 0; i < 2 + n_board; i++) h = pe::add(h, c7[i]);
@@ -335,7 +336,9 @@ class Bot {
     decisions++;
     tr.apply(o);                                     // on failure the tracker resyncs from the snapshot
     const pk::Player& me = tr.players[tr.me];
-    rng.x ^= (uint64_t)o.round * 0x9E3779B97F4A7C15ull ^ (uint64_t)me.hand[0] << 8 ^ (uint64_t)me.hand[1] << 16;
+    // a clean per-turn seed (not XORed into the running state): the same situation always gets the same random stream,
+    // whatever the time-budgeted Monte Carlo of earlier turns consumed, so decisions are reproducible across builds
+    rng.x = seed0 ^ (uint64_t)o.round * 0x9E3779B97F4A7C15ull ^ (uint64_t)me.hand[0] << 8 ^ (uint64_t)me.hand[1] << 16;
     // what the referee offers
     bool can_check = false, can_raise = false, can_allin = false, can_call = false;
     int min_bet = 0;
