@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "poker_engine.hpp"
+#include "tracker.hpp"
 
 static std::string esc(const std::string& s) {
   std::string o;
@@ -104,6 +105,26 @@ struct ReplayAgent : pk::Agent {
   }
 };
 
+// Wraps an agent with a Tracker fed the exact stdin text of every decision; counts failed checks.
+struct TrackingAgent : pk::Agent {
+  pk::Agent* inner; pk::Tracker tr; bool first = true; int fails = 0; std::string first_error;
+  pk::Obs parsed;                                     // persistent: later turns need its init fields
+  bool act(const pk::Obs& o, std::string& out) override {
+    std::istringstream in(o.to_stdin(first));
+    bool ok = pk::read_obs(in, first, parsed) && parsed.to_stdin(first) == o.to_stdin(first);
+    first = false;
+    if (!ok) { fails++; if (first_error.empty()) first_error = "stdin parse round-trip"; }
+    else if (!tr.apply(parsed)) {
+      fails++;
+      if (first_error.empty()) {
+        first_error = "round " + std::to_string(o.round) + " seat " + std::to_string(o.player_id) + ": " + tr.last_error;
+        if (getenv("TRACK_DEBUG")) { fprintf(stderr, "%s\n--- stdin ---\n%s", first_error.c_str(), o.to_stdin(false).c_str()); }
+      }
+    }
+    return inner->act(o, out);
+  }
+};
+
 static void write_result(std::ofstream& out, pk::Engine& eng, const pk::Engine::Result& r) {
   for (auto& l : eng.log) out << "S " << l.turn << " " << l.hand << " " << l.pid << " " << l.shown << "\n";
   out << "R " << r.hands << " " << r.rounds << " " << (r.cancelled ? 1 : 0);
@@ -125,10 +146,12 @@ int main(int argc, char** argv) {
       int style = meta.below(6);
       out << "G " << g << " " << n << " " << seed << "\n";
       std::vector<RandomAgent> bots(n);
+      std::vector<TrackingAgent> tracked(n);
       std::vector<pk::Agent*> ag;
       for (int i = 0; i < n; i++) {
         bots[i].rng = Rng{meta.next()}; bots[i].style = style == 0 ? meta.below(6) : style; bots[i].log = &out; bots[i].pid = i;
-        ag.push_back(&bots[i]);
+        tracked[i].inner = &bots[i];
+        ag.push_back(&tracked[i]);
       }
       pk::Engine eng(n, seed);
       try {
@@ -138,6 +161,9 @@ int main(int argc, char** argv) {
         for (auto& l : eng.log) out << "S " << l.turn << " " << l.hand << " " << l.pid << " " << l.shown << "\n";
         out << "X " << e.what() << "\n";
       }
+      int tf = 0; std::string err;
+      for (auto& t : tracked) { tf += t.fails; if (err.empty()) err = t.first_error; }
+      out << "T " << tf << " " << err << "\n";
     }
     return 0;
   }
@@ -161,10 +187,12 @@ int main(int argc, char** argv) {
       out << "G " << g.id << " " << g.n << " " << g.seed << "\n";
       size_t pos = 0; bool order_ok = true, ht = false;
       std::vector<ReplayAgent> bots(g.n);
+      std::vector<TrackingAgent> tracked(g.n);
       std::vector<pk::Agent*> ag;
       for (int i = 0; i < g.n; i++) {
         bots[i].q = &g.acts; bots[i].pos = &pos; bots[i].pid = i; bots[i].order_ok = &order_ok; bots[i].has_timeout = &ht;
-        ag.push_back(&bots[i]);
+        tracked[i].inner = &bots[i];
+        ag.push_back(&tracked[i]);
       }
       pk::Engine eng(g.n, g.seed);
       try {
@@ -175,6 +203,9 @@ int main(int argc, char** argv) {
         out << "X " << e.what() << "\n";
       }
       out << "O " << (order_ok && pos == g.acts.size() ? 1 : 0) << " " << pos << " " << g.acts.size() << "\n";
+      int tf = 0; std::string err;
+      for (auto& t : tracked) { tf += t.fails; if (err.empty()) err = t.first_error; }
+      out << "T " << tf << " " << err << "\n";
     }
     return 0;
   }

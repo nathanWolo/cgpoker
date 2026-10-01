@@ -54,7 +54,7 @@ def parse_log(path):
         tag, rest = line[:1], line[2:]
         if tag == "G":
             gid, n, seed = rest.split(" ")
-            games.append(dict(id=gid, n=int(n), seed=int(seed), acts=[], S=[], R=None, X=None, O=None))
+            games.append(dict(id=gid, n=int(n), seed=int(seed), acts=[], S=[], R=None, X=None, O=None, T=(0, '')))
         elif tag == "A":
             pid, _, text = rest.partition(" ")
             games[-1]["acts"].append((int(pid), None if text == "\\0" else unesc(text)))
@@ -69,6 +69,9 @@ def parse_log(path):
         elif tag == "O":
             ok, pos, tot = rest.split(" ")
             games[-1]["O"] = (ok == "1", int(pos), int(tot))
+        elif tag == "T":
+            nf, _, err = rest.partition(" ")
+            games[-1]["T"] = (int(nf), err)
     return games
 
 
@@ -116,6 +119,11 @@ def fuzz(games, seed):
             stats["hands"] += pres["hands"]
         stats["decisions"] += len(g["S"])
         stats["timeouts"] += sum(a[1] is None for a in g["acts"])
+        if g["T"][0]:
+            stats["tracker_fail"] = stats.get("tracker_fail", 0) + g["T"][0]
+            if stats["tracker_fail"] <= 5 * g["T"][0]:
+                print("TRACKER", g["id"], "n", g["n"], "seed", g["seed"], "fails", g["T"][0], g["T"][1])
+            ok = False
         stats["by_n"][g["n"]] += 1
         if not ok:
             bad += 1
@@ -128,7 +136,7 @@ def fuzz(games, seed):
     print(f"fuzz: {len(gs) - bad}/{len(gs)} random games identical to poker_sim.py "
           f"(2p/3p/4p {stats['by_n'][2]}/{stats['by_n'][3]}/{stats['by_n'][4]}, {stats['decisions']} decisions, "
           f"{stats['hands']} hands, {stats['cancelled']} hit the 600 cap, {stats['raised']} NONE-at-601 raises, "
-          f"{stats['timeouts']} timeouts)")
+          f"{stats['timeouts']} timeouts); tracker checks failed: {stats.get('tracker_fail', 0)}")
     return bad == 0
 
 
@@ -152,10 +160,15 @@ def replays(paths):
     good = 0
     for g in gs:
         ok = g["R"] is not None and g["O"][0] and [float(x) for x in g["R"]["scores"]] == recorded[g["id"]]
-        good += ok
         if not ok:
             print("MISMATCH", g["id"], "n", g["n"], "order", g["O"], "cpp", g["R"] or g["X"], "cg", recorded[g["id"]])
-    print(f"replays: {good}/{len(gs)} recorded games reproduced by the C++ engine (turn order + final scores)")
+        if g["T"][0]:
+            print("TRACKER", g["id"], "n", g["n"], "fails", g["T"][0], g["T"][1])
+            ok = False
+        good += ok
+    tf = sum(g["T"][0] for g in gs)
+    print(f"replays: {good}/{len(gs)} recorded games reproduced by the C++ engine (turn order + final scores); "
+          f"tracker checks failed: {tf}")
     return good == len(gs) and len(gs) == len(paths)
 
 

@@ -2,6 +2,10 @@
 // poker_engine.hpp - C++ port of the CodinGame "Poker" referee (wala-fr/CodingamePoker @ ac30d97),
 // method for method the same as sim/poker_sim.py, which is the validated Python port.
 //
+// Board holds the rules (blinds, betting, action replacement, side pots, elimination ranks) with no
+// deck and no RNG, so the bot's tracker (tracker.hpp) can drive it from stdin.  Engine adds the deck,
+// the inputs and the Referee.gameTurn loop.
+//
 // Game loop: Engine eng(n, seed); eng.run(agents) with one Agent per seat.  Agent::act receives the
 // Obs the real bot would get on stdin (Obs::to_stdin renders the exact text) and returns the bot's
 // raw output line, or false for a timeout.  Rounds, the 600-decision cap with refund, NONE rounds,
@@ -105,9 +109,9 @@ struct Player {
 
 struct Obs {
   // init (meaningful on the first call for this player)
-  int small_blind, big_blind, hand_nb_by_level, level_mult, buy_in, first_bb_id, player_nb, player_id;
+  int small_blind = 0, big_blind = 0, hand_nb_by_level = 0, level_mult = 0, buy_in = 0, first_bb_id = 0, player_nb = 0, player_id = 0;
   // per turn
-  int round, hand_nb;
+  int round = 0, hand_nb = 0;
   std::vector<int> stacks, chip_in_pot;
   std::string board, cards;
   std::vector<std::string> actions;    // "round handNb playerId ACTION BOARD"
@@ -148,40 +152,28 @@ inline const char* act_name(ActType t) {
 struct RoundInfo { int turn, hand, pid; std::string shown, board; };
 struct LogEntry { int turn, hand, pid; std::string shown; };
 
-class Engine {
+// The rules of one table: everything in the referee's Board/ActionUtils/WinningCalculator that does
+// not touch the deck.  Card identities come from draw(), which a Board alone does not know (-1).
+class Board {
  public:
-  int n;
-  Sha1Prng rng;
-  int first_bb;
+  int n = 0;
   std::vector<Player> players;
-  int sb, bb, level, hand_nb, bb_id, sb_id = -1, dealer_id = -1;
-  bool over, calc_winnings = false, deal_card = false, calc_next = false, game_over = false, cancelled = false;
+  int sb = SMALL_BLIND, bb = BIG_BLIND, level = 1, hand_nb = 0, bb_id = 0, sb_id = -1, dealer_id = -1;
+  bool over = true, calc_winnings = false, deal_card = false, calc_next = false, game_over = false, cancelled = false;
   int turn = 0;
   int pot = 0;
-  std::vector<int> board;
-  std::vector<int> deck;
-  int deck_idx = 0;
+  std::vector<int> board;                            // card ids; -1 = dealt but not yet known (tracker)
   int last_round_raise = 0, last_total_round_bet = 0, last_raiser = -1, raise_nb = 0, last_player = -1, next_player = -1;
-  std::vector<RoundInfo> round_infos;                // index = turn (0 unused)
-  struct Showdown { std::string board; std::vector<std::string> cards; std::vector<char> elim; };
-  std::vector<Showdown> showdowns;                   // index = hand
-  std::vector<int> last_sent_round, last_sent_hand;
-  int last_hand_round = 0;
-  std::vector<LogEntry> log;
 
-  Engine(int n_, int64_t seed) : n(n_), rng(seed) {
+  Board() {}
+  Board(int n_, int first_bb) : n(n_) {
     if (n < 2 || n > 4) throw std::invalid_argument("n must be 2..4");
-    first_bb = rng.next_int(n);                      // Referee.java: first BB
     players.resize(n);
     for (int i = 0; i < n; i++) players[i].id = i, players[i].stack = TOTAL_BUY_IN / n;
-    sb = SMALL_BLIND; bb = BIG_BLIND; level = 1; hand_nb = 0; bb_id = first_bb; over = true;
-    round_infos.resize(MAX_TURN + 2);
-    showdowns.resize(1);
-    last_sent_round.assign(n, 0);
-    last_sent_hand.assign(n, 0);
-    // Referee.init
-    reset_hand(); init_deck(); init_blind(); calculate_next_player();
+    bb_id = first_bb;
   }
+  virtual ~Board() {}
+  virtual int draw() { return -1; }
 
   // ------------------------------------------------------------------ Board helpers
   void reset_round() {
@@ -221,15 +213,6 @@ class Engine {
     last_player = -1; next_player = bb_id;
     last_total_round_bet = bb; last_round_raise = sb; last_raiser = -1; raise_nb = 1;
   }
-  void init_deck() {
-    deck.resize(52);
-    for (int i = 0; i < 52; i++) deck[i] = i;          // rank-major, CardUtils order
-    rng.shuffle(deck);
-    int r = rng.next_int(52);                           // Deck.cut
-    std::rotate(deck.begin(), deck.begin() + r, deck.end());
-    deck_idx = 0;
-  }
-  int draw() { return deck[deck_idx++]; }
   void init_blind() {
     // every non-folded player posts at least the SMALL blind (Board.initBlind)
     for (auto& p : players)
@@ -472,6 +455,10 @@ class Engine {
         tot += t; bets[i] -= t;
         if (bets[i] == 0) folded[i] = true;
       }
+      if (winners.empty()) {                             // impossible in the referee; a desynced Tracker
+        for (int i = 0; i < n; i++) win[i] += std::min(players[i].total, mn);   //   gets its chips back
+        break;
+      }
       int share = tot / (int)winners.size(), rem = tot % (int)winners.size();
       for (int w : winners) win[w] += share;
       int j = dealer_id + 1;                           // odd chips: first winner after the dealer
@@ -504,16 +491,52 @@ class Engine {
     return over && alive == 1;
   }
 
-  // ------------------------------------------------------------------ input protocol
   static std::string cards_str(const int* c, int k, int pad) {
     std::string s;
     for (int i = 0; i < pad; i++) {
       if (i) s += '_';
-      s += i < k ? card_str(c[i]) : "X";
+      s += i < k ? (c[i] < 0 ? "?" : card_str(c[i])) : "X";
     }
     return s;
   }
   std::string board_str() const { return cards_str(board.data(), (int)board.size(), 5); }
+};
+
+class Engine : public Board {
+ public:
+  Sha1Prng rng;
+  int first_bb;
+  std::vector<int> deck;
+  int deck_idx = 0;
+  std::vector<RoundInfo> round_infos;                // index = turn (0 unused)
+  struct Showdown { std::string board; std::vector<std::string> cards; std::vector<char> elim; };
+  std::vector<Showdown> showdowns;                   // index = hand
+  std::vector<int> last_sent_round, last_sent_hand;
+  int last_hand_round = 0;
+  std::vector<LogEntry> log;
+
+  Engine(int n_, int64_t seed) : rng(seed) {
+    if (n_ < 2 || n_ > 4) throw std::invalid_argument("n must be 2..4");
+    first_bb = rng.next_int(n_);                     // Referee.java: first BB
+    static_cast<Board&>(*this) = Board(n_, first_bb);
+    round_infos.resize(MAX_TURN + 2);
+    showdowns.resize(1);
+    last_sent_round.assign(n, 0);
+    last_sent_hand.assign(n, 0);
+    // Referee.init
+    reset_hand(); init_deck(); init_blind(); calculate_next_player();
+  }
+  void init_deck() {
+    deck.resize(52);
+    for (int i = 0; i < 52; i++) deck[i] = i;          // rank-major, CardUtils order
+    rng.shuffle(deck);
+    int r = rng.next_int(52);                           // Deck.cut
+    std::rotate(deck.begin(), deck.begin() + r, deck.end());
+    deck_idx = 0;
+  }
+  int draw() override { return deck[deck_idx++]; }
+
+  // ------------------------------------------------------------------ input protocol
   void record_showdown() {
     // ShowDownInfo: every non-eliminated player's hole cards are revealed (SHOW_FOLDED_CARDS=true)
     Showdown sd;
