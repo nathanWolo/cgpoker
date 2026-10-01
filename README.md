@@ -14,8 +14,8 @@ docs is labelled with the script that reproduces it.
 **Status (2026-10-01):** research and tooling are done and reproducible (`make all`); the bot itself
 is not written yet. [`docs/plan.md`](docs/plan.md) is the plan (milestones M0-M6).
 
-This repository is **private** because it contains competition strategy: the plan, field
-analysis and opponent profiles of live bots. Keep it private.
+This is a public, just-for-fun project. Note that it includes the bot's plan, field analysis and
+profiles of live arena bots, so anyone in the arena can read them.
 
 ## Repository map
 

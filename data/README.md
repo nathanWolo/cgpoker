@@ -18,5 +18,5 @@ plus one derived file. **Check CodinGame's terms of service before any bulk harv
 Two Waffle3z battle-list snapshots from the research run (`battles_waffle.json`, `lb_waffle.json`)
 were byte-identical to `battles/Waffle3z.json.gz` and were not kept.
 
-The leaderboard and battle lists contain other players' public profile data (pseudo, country, school,
-company). That is one more reason this repository stays private.
+The leaderboard and battle lists contain other players' profile data (pseudo, country, school,
+company) as returned by CodinGame's public API.
