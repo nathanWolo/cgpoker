@@ -1,6 +1,6 @@
 """Distil the solved push/fold grids (solvers/pfn/pfn.cpp `grid`) into bot/pfn_tables.hpp.
 
-    python3 solvers/pfn/distil.py [--grids data/cache/pfn/grid_3p3.bin ...] [--out bot/pfn_tables.hpp]
+    python3 solvers/pfn/distil.py [--grids data/pfn/grid_3p3.bin ...] [--out bot/pfn_tables.hpp]
 
 For every decision node the fictitious-play strategy at each stack configuration is replaced by a
 threshold on one node-specific ranking of the 169 preflop classes (ranked by the class's average jam

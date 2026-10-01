@@ -119,7 +119,7 @@ class Bot {
   long decisions = 0, trials_total = 0;
   bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
   double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
-  double pfn_max_bb = 12;                 // 3-4 players, preflop, first in: use the ICM push/fold chart up to this stack (BB)
+  double pfn_max_bb = 20;                 // 3-4 players, preflop: the ICM push/fold chart decides first-in, over limps and against a raise up to this stack (BB); 20 beat 12 in the arena
 
   // table-free value of the best 5 of k (5..7) cards
   static uint32_t slow_partial(const int* c, int k) {
@@ -340,26 +340,30 @@ class Bot {
       int order[4], no = 0;                             // action order: after the BB round to the BB; alive seats only
       for (int s = 1; s <= n; s++) { int id = (tr.bb_id + s) % n; if (tr.players[id].stack + tr.players[id].total > 0) order[no++] = id; }
       int mi = -1; for (int j = 0; j < no; j++) if (order[j] == tr.me) mi = j;
-      bool ontree = mi >= 0 && no == alive; int prefix = 0, limpers = 0;
+      bool ontree = mi >= 0 && no == alive, raised = false, shortie = (double)my_start / bb <= pfn_max_bb; int prefix = 0, limpers = 0;
       for (int j = 0; j < mi && ontree; j++) {
         const pk::Player& p = tr.players[order[j]];
         if (p.folded) continue;
         if (p.allin || (prefix != 0 && p.rnd > bb)) prefix |= 1 << j;   // a jam, or a call of one by a bigger stack
         else if (prefix == 0 && p.rnd <= bb) limpers++;                 // a limp: the chart has no limp node, count it as a fold
-        else ontree = false;                                            // a raise: off the chart's tree
+        else if (shortie && !raised && p.rnd > bb) { raised = true; prefix |= 1 << j; }   // a raise: short, we answer it jam or fold, as if it were a jam
+        else ontree = false;                                            // a raise while we are deep: off the chart's tree
       }
       for (int j = mi + 1; j < no && ontree; j++) if (tr.players[order[j]].spoken) ontree = false;
       const PfnGame* g = ontree ? pfn_find(alive, n) : nullptr;
       bool facing_jam = prefix != 0;
-      if (g && (facing_jam || (double)my_start / bb <= pfn_max_bb)) {
+      // a jam much shorter than our stack with players still to act behind us is not the chart's "call" (which
+      // commits our whole stack): the pot-odds rules below price that
+      bool small_call = facing_jam && !raised && call_amt < 0.4 * stack && mi + 1 < no;
+      if (g && !small_call && (facing_jam || shortie)) {
         int nd = (1 << mi) - 1 + prefix, k = -1;
         for (int q = 0; q < g->nn; q++) if (g->nodes[q] == nd) k = q;
         if (k >= 0) {
           double st[4]; for (int j = 0; j < no; j++) st[j] = (double)(tr.players[order[j]].stack + tr.players[order[j]].total) / bb;
           double T = pfn_threshold(*g, k, st);
           bool go = g->pos[k * 169 + cls] + 0.5 < T;
-          last_tag = facing_jam ? "pfn-call" : limpers ? "pfn-jam-lim" : "pfn-jam"; last_equity = -1; last_trials = 0;
-          if (go) return facing_jam ? call_s() : can_allin ? "ALL-IN" : bet(stack);
+          last_tag = raised ? "pfn-rejam" : facing_jam ? "pfn-call" : limpers ? "pfn-jam-lim" : "pfn-jam"; last_equity = -1; last_trials = 0;
+          if (go) return facing_jam && !raised ? call_s() : can_allin ? "ALL-IN" : bet(stack);
           if (can_check) return "CHECK";                                // the BB's free option is never folded
           if (facing_jam || !limpers) return "FOLD";
           // chart says fold over limpers: completing is cheap, let the rules below price it

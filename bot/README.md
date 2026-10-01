@@ -16,9 +16,14 @@
 python3 tools/bundle.py --minify     # build/cg/poker_bundled.cpp (readable) and build/cg/poker_min.cpp (submit this)
 ```
 
+`tools/run_submission.py build/cg/poker_min.cpp --compare build/cg/poker_bundled.cpp` then plays the
+built file through whole games in the Python referee port (stdin/stdout exactly as CodinGame sends
+them): no crash, every turn answered, turn times, and the minified build's answers against the
+readable one on identical inputs (M1: 562/562 identical over six 4-player games).
+
 Both files are compiled with CodinGame's own flags (`-std=gnu++20 -Werror=return-type -g -pthread`, no
-`-O`; the sources carry `#pragma GCC optimize("O3")`; CodinGame reported `__cplusplus=202002`). Observed (M0.1): bundled 70.8k chars, minified
-32.1k chars, cap 100,000. The minified binary's output on a recorded stdin is identical to the
+`-O`; the sources carry `#pragma GCC optimize("O3")`; CodinGame reported `__cplusplus=202002`). Observed (M1): bundled 100.0k chars, minified
+53.2k chars, cap 100,000 (the readable bundle is now over the cap by 13 characters; submit the minified one). The minified binary's output on a recorded stdin is identical to the
 bundled one (`tools/bundle.py` checks compilation; the output comparison was done by hand with
 `sim/poker_sim.py`'s `obs_to_stdin`).
 
@@ -27,14 +32,26 @@ nested `std::chrono` names) and a few more std member names (`rfind`, `compare`,
 
 ## Policy (M1)
 
-Changes over M0.1 (below): with 3-4 players alive preflop and nothing but folds and jams so far,
-the bot plays the ICM push/fold chart (`pfn_tables.hpp`, from `solvers/pfn/`, see its
-[README](../solvers/pfn/README.md)): always when facing a jam, first in when its own stack is
-≤ 12 BB (`pfn_max_bb`, env `BOT_PFN` in the arena). The chart is one class ranking per decision node
-and one threshold per stack-grid point, interpolated in log-stack; a limp or a raise before us is
-off its tree and falls through to the M0.1 rules. The big-call ICM now scores a bust at the right
-place (it paid 0 instead of 3rd of 4 = .3556). Unit tests: `bot/test_bot.cpp` (`make bot-test`).
-Arena, paired against M0.1b: @@ARENA_M1@@.
+Changes over M0.1 (below): with 3-4 players alive preflop, the bot plays the ICM push/fold chart
+(`pfn_tables.hpp`, from `solvers/pfn/`, see its [README](../solvers/pfn/README.md)) whenever the
+action so far fits its jam/fold tree: facing a jam (always, unless the jam is small next to our
+stack and players are still to act, where pot odds apply); first in, over limpers (a limp counts as
+a fold, the chart has no limp node) and against a raise (answered jam or fold through the chart's
+call node, as if the raise were a jam) when our own stack is ≤ 20 BB (`pfn_max_bb`, env `BOT_PFN`
+in the arena). The chart is one class ranking per decision node and one threshold per stack-grid
+point, interpolated in log-stack. Everything else falls through to the M0.1 rules. The big-call
+ICM now scores a bust at the right place (it paid 0 instead of 3rd of 4 = .3556). Unit tests:
+`bot/test_bot.cpp` (`make bot-test`).
+
+What the live M0.1b games showed (84 placement games, rank 5/194, `analysis/shortstack.py`): with
+≤ 12 BB and 3-4 players the bot limped 78% of unopened pots (−84 BB over the games) and called
+half the raises it faced (−32 BB); 15 games ended with it blinded down below 2 BB.
+
+Arena, 3-player games paired against copies of M0.1b (4,500 games each): chart gated at 12 BB
++0.003 ± 0.003 payout/game; gated at 20 BB +0.011 ± 0.004; 20 BB with the re-jam rule
+**+0.014 ± 0.004, SPRT pass**. Against the maniac/jammer/station/random field all variants are
++0.000 ± 0.002: those games rarely reach short-stack play.
+Arena at all table sizes, paired against M0.1b: **+0.021 ± 0.003 payout per game** over 9,469 paired games at all table sizes against copies of M0.1b (SPRT pass; 2-player games are untouched, the gain is in 3- and 4-player games), and −0.006 ± 0.001 against the maniac/jammer/station/random field, where equilibrium jams and tight ICM calls give a little away to any-two callers and shovers. Kept as is, per the equilibrium-first stance.
 
 ## Policy (M0.1)
 

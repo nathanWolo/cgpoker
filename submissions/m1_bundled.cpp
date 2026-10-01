@@ -1,0 +1,1763 @@
+#pragma GCC optimize("O3")
+#pragma GCC optimization("unroll-loops")
+// main.cpp - CodinGame entry point: stdin -> bot::Bot -> stdout.  Bundle with tools/bundle.py.
+//
+// The pe7c tables are built in a background thread from process start (on CodinGame the start-up
+// phase took 2.3 s once, against 80 ms here); until they are ready the bot evaluates with the
+// table-free eval7_slow.  No turn ever waits for initialisation.
+//
+// Dev builds (DEBUG below) print per-turn diagnostics to stderr; the first turn also prints the
+// platform probes the plan's M0 asks for: __cplusplus, evaluator start-up time, Monte Carlo
+// trials per second, and (PONDER) whether a background thread makes progress between turns.
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <iostream>
+#include <string>
+#include <thread>
+#pragma GCC target("avx2,bmi,bmi2,lzcnt,popcnt")
+
+// ---- bot/bot.hpp
+// bot.hpp - the CodinGame Poker bot's decision logic (M0 baseline).  Used by main.cpp (stdin/stdout)
+// and by the arena (in-process).  No macros: the minifier renames them inconsistently.
+//
+// M0 policy: a state tracker (engine/tracker.hpp) replays the hand exactly; Monte Carlo equity
+// against uniform random hands (pe7c evaluator) versus pot odds with this game's dead-money pots;
+// HU jam/fold Nash thresholds (pf_tables.hpp) at short effective stacks.  Later milestones replace
+// the policy, not the plumbing.
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <string>
+
+// ---- cpp/eval7_slow.hpp
+// eval7_slow.hpp - table-free 7-card evaluator (no initialisation at all).  Returns a value with the
+// same ordering as poker_sim.eval5 / engine best7: category << 20, then the deciding ranks in 4-bit
+// fields (ranks 2..14).  Roughly 10x slower than pe7c, but needs no start-up: the bot uses it until
+// the pe7c tables are built in the background.  Cards are 4*rank + suit as everywhere else.
+#include <cstdint>
+
+namespace e7 {
+
+__attribute__((always_inline)) inline int straight_top(uint32_t m) {   // m: 13-bit rank mask (bit 0 = deuce)
+  uint32_t w = m << 1 | (m >> 12 & 1);                                  // ace also plays low
+  uint32_t s = w & w >> 1 & w >> 2 & w >> 3 & w >> 4;                   // bit i set: straight topped by rank bit i (in w)
+  if (!s) return 0;
+  return 31 - __builtin_clz(s) + 1;                                     // 2..14 as rank value (w bit i = rank i+1)
+}
+__attribute__((always_inline)) inline uint32_t top_bits(uint32_t m, int n) {  // the n highest set bits, packed as ranks
+  uint32_t v = 0;
+  for (int i = 0; i < n; i++) { int b = 31 - __builtin_clz(m); v = v << 4 | (b + 2); m &= ~(1u << b); }
+  return v;
+}
+
+inline uint32_t ev7(const int* c) {
+  uint32_t sm[4] = {0, 0, 0, 0}; int cnt[13] = {0};
+  for (int i = 0; i < 7; i++) sm[c[i] & 3] |= 1u << (c[i] >> 2), cnt[c[i] >> 2]++;
+  uint32_t all = sm[0] | sm[1] | sm[2] | sm[3];
+  for (int s = 0; s < 4; s++)
+    if (__builtin_popcount(sm[s]) >= 5) {                               // flush (only one suit can have 5 of 7)
+      int st = straight_top(sm[s]);
+      if (st) return 8u << 20 | (uint32_t)st << 16;
+      return 5u << 20 | top_bits(sm[s], 5);
+    }
+  uint32_t quad = 0, trips = 0, pairs = 0;
+  for (int r = 0; r < 13; r++) {
+    if (cnt[r] == 4) quad |= 1u << r; else if (cnt[r] == 3) trips |= 1u << r; else if (cnt[r] == 2) pairs |= 1u << r;
+  }
+  if (quad) { int q = 31 - __builtin_clz(quad); return 7u << 20 | (uint32_t)(q + 2) << 16 | top_bits(all & ~(1u << q), 1) << 12; }
+  if (trips && (pairs || __builtin_popcount(trips) > 1)) {
+    int t = 31 - __builtin_clz(trips);
+    uint32_t rest = (trips & ~(1u << t)) | pairs;
+    return 6u << 20 | (uint32_t)(t + 2) << 16 | top_bits(rest, 1) << 12;
+  }
+  int st = straight_top(all);
+  if (st) return 4u << 20 | (uint32_t)st << 16;
+  if (trips) { int t = 31 - __builtin_clz(trips); return 3u << 20 | (uint32_t)(t + 2) << 16 | top_bits(all & ~(1u << t), 2) << 8; }
+  if (__builtin_popcount(pairs) >= 2) {
+    int p1 = 31 - __builtin_clz(pairs); uint32_t rest = pairs & ~(1u << p1); int p2 = 31 - __builtin_clz(rest);
+    return 2u << 20 | (uint32_t)(p1 + 2) << 16 | (uint32_t)(p2 + 2) << 12 | top_bits(all & ~(1u << p1) & ~(1u << p2), 1) << 8;
+  }
+  if (pairs) { int p = 31 - __builtin_clz(pairs); return 1u << 20 | (uint32_t)(p + 2) << 16 | top_bits(all & ~(1u << p), 3) << 4; }
+  return top_bits(all, 5);
+}
+
+}  // namespace e7
+// ---- cpp/icm.hpp
+// icm.hpp - tournament equity by the Independent Chip Model (Malmuth-Harville), for up to 4 players,
+// with the placement payouts that CodinGame's placement-only TrueSkill implies at equal ratings
+// (solvers/trueskill_payouts.py): 2p (1,0), 3p (1,.5,0), 4p (1,.6444,.3556,0).
+//
+// icm(stacks, n, seat, pay): seat's expected payout.  `stacks` holds the n players who were alive at
+// the start of the hand (players who busted in earlier hands are left out: they already own the places
+// below); `pay` is the payout vector of the whole game (n_total entries, n_total >= n).  A stack of 0
+// means "busted in this hand": it takes the next place below everyone still alive (several busting
+// together share those places).  Shared by the bot (bot/bot.hpp) and the push/fold solver
+// (solvers/pfn/).  No tables, no state.
+#include <algorithm>
+
+namespace icm {
+
+const double PAY2[] = {1, 0}, PAY3[] = {1, .5, 0}, PAY4[] = {1, .6444, .3556, 0};
+inline const double* payouts(int n_total) { return n_total == 2 ? PAY2 : n_total == 3 ? PAY3 : PAY4; }
+
+// P(seat finishes at `depth` or later places) recursion: the probability that `me` takes each place
+inline double rec(const double* st, int n, double total, int depth, const double* pay, int me, bool* used) {
+  double v = 0;
+  for (int i = 0; i < n; i++) {
+    if (used[i] || st[i] <= 0) continue;
+    double p = st[i] / total;
+    if (i == me) v += p * pay[depth];
+    else {
+      used[i] = true;
+      v += p * rec(st, n, total - st[i], depth + 1, pay, me, used);
+      used[i] = false;
+    }
+  }
+  return v;
+}
+
+// stacks[0..n) chips of the players alive at hand start (0 = busted this hand); pay: the game's payouts
+inline double icm(const double* stacks, int n, int seat, const double* pay) {
+  double total = 0; int alive = 0, dead = 0;
+  for (int i = 0; i < n; i++) {
+    if (stacks[i] > 0) total += stacks[i], alive++; else dead++;
+  }
+  if (stacks[seat] <= 0) {                             // busted: the places below the alive players, shared
+    double s = 0;
+    for (int k = alive; k < alive + dead && k < n; k++) s += pay[k];
+    return dead ? s / dead : 0;
+  }
+  if (alive == 1) return pay[0];
+  bool used[4] = {false, false, false, false};
+  return rec(stacks, n, total, 0, pay, seat, used);
+}
+// n_total: the players the game started with (chooses the payout vector)
+inline double icm(const double* stacks, int n, int seat, int n_total) { return icm(stacks, n, seat, payouts(n_total)); }
+
+}  // namespace icm
+// ---- bot/pfn_tables.hpp
+// pfn_tables.hpp - ICM push/fold charts for 3-4 players (solvers/pfn, distilled by solvers/pfn/distil.py).
+// Per game: stack levels (BB, every player; action order, the BB last), node ids ((1<<i)-1+prefix,
+// prefix bit j = player j jammed) and a CJK14 string holding rank[node][169] then thr[node][L^N]:
+// at a grid point jam/call with the first thr classes of the node's ranking (class index as in eq.c).
+namespace pfn_t {
+struct GameT { int N, nt, L, nn; const double* levels; const int* nodes; const char* data; };
+// grid_3p3.bin: 343 points, 6 nodes, 1756 chars
+const double LV0[7] = {2.5, 3.5, 5, 7, 10, 14, 20};
+const int ND0[6] = {0, 1, 2, 4, 5, 6};
+const char D0[] = R"~(砦盇蟂疛瞘盪撑抁欑瞚屢瀸煥葺吂涠撢肩桹膊慧柃対挜浐嚙庙肓写澗耠媒橛縇籅粇杤吕琚嵌朞癕宍渿楖儨弖儥汔獷瀉稘旕煴篝挋嶑啢狅祑悗畓枩均怊咔媐蜗戆蒃苕欺傏參京襂埖苲婴稚憍僐艘氮姐怠牀洕嘃缐溄戃劁缰嘘刁佪垨翹级瓩盪掊犁挝垚嬚炘柣栓灞个烖砉豙孳疢矙挀膜淉濆桑讉檤羐聊噼橃眖譥獻濤勀侺咏朘懷砕煭搌癆位蝗滉斆罚倘投払诜奋嶝璳欐罊斔抔次硵圊撑櫘謊屐脃羠衐敎耵纠摛姂慒穬瀭妐烄謸挝埂倓幸湁嗆潀樴帓剃缠娘倄佀梉砱豰矦萪栺獔湩剧悌蚙皙螂碆孚珨埸偸橍烜蝩葲塀嫃睗讘璔浢攡瑌婙犀嚇缲彥橤哳谾啻澖儦怕簥没來厎克楕纷琉虠嶔荦绅蕕旒猤抑萗寔扇报礊恗煤櫵硈廌咒滰煨厎膕荀衜偋耥窸挛孋悴誱倈憈彂亜欇嗇煄剨愆劃弁刼匃伀渚灪婾権萪桭报熩嘔柒焸瑨瞆沆嬪珖矺倀檞烓柙桱膊布焲柽讕呀嚙帱瑲狟在澽罙牤喴羕粏晡虣诩犅拘萆苊別彖匨嫝洘汕蓈埡刋掕悔篝弾宗畦笝兪堝愔漩圹桔侲廔表受悵绵倻埂燃佬欬懆狢嫐笍喐形蚼帉嚇绱技弈噅丱嘜倓侁丐撢梌涜吥悞瑆睦衈蠄蚙盝垊堶斡柖瘂碂涋玜蟤萪歀嫧坑翽瑽猢恧噦慙儃眧耡婱牙擳豂啻燀儨条牮潉斡瀑潣惕蘰竹箂汘喅曅穓毒灅揙洗恔畔戨譫梒儅蜝彩弍耳羠搩峍珔孀圹岗僲溉椵哋炴嚴捏夂勢橴校嬇潄劀洍俄伱剈崆仁丠戆皚焟硷偮瑢熩捊怆杆琝堳瀶炗烨昆檪墟瘥男葹栜淧暙摱詯檓杇吠岓嫙疴侺怦晆朖搝析儡瑅審湭曀围耕暄巑斕坞兟椌獧潔薂坒蕴庤晑嶒畦筹國忌抃柕硩圐肃狵帗敎璁竰縻字傰睬煂埋勱艩尯奅烣幸圢児忱所嘡嘅仱剈儇亄繠帔位忍烢媌框姍熓曌縴嫉扤欥唳宑艵卭焰屔搶宩紮屔搷厪倩屔搷吉絜欓牣狐畔愓狔曤船庎苔朙吮廐舵佁帩峑猅佅戤峑猕譭焤寑猅讍敩燝勃蛬蕣抝勄囸襐抐狄挕倴序臤缱吩峏爤圹怤嬏牄蜱搣娏狄蝙摿瑤蒔困職欤啄绸襣暗畄绸詆掐爤圈谮峏燲笉倥嬏凤囹娣夌爤圉傕矧噶櫸覄燦朇弈詵欝嚆蜈詣林琖匰豇挓刣蜉倩寎臢竈贤夋愣蛼肦硩朗譬肗瘪垘殤誂燣眨潸豪汝啇睸赛桙珤缰豉挓狄拈耥姌炲窬禩硪柈珝抣硪桘诩璗甩袙揙梂燣蜉俑慪淝嗧役慣梙琕眈譆挕狄拈熏殓舓嚐檢皝吤滰膩硪擤缜覩硪梕諬螩硪梚猰覩硪梚璤覩硪梚璦瞊殚厤謄讕瓞撅挡侢瞩唦佅嚨硪梖蜰覩硪梚獼覩硪梚璥喩硪梚璦瞆澞畦澉梑狠蕦坕岕痦藶极掝眪框蝉喣硪梚玽喥硪梚璥涩硪梚璦瞑澡癨俙蒑燡疷枡炕猤藷復炝瓧螷垁徝皩袚殽媠瞪梚璥涥硪梚璦瞕獤朘耚咕無癨俙蒝牤蘧珡芝猤蜇徹溝甧螹宽憝痩塺悉綠盪梚璦疝畧杙摆徝無癨栙袝牢昸埵蒝牤蘧译粝猤蜸垽涝珦螹籁綝甧衊悖憝畧柙葶掝牣囈栚咝牢暘導傝牣蘧诡芝猤蘧诉粝獤蜸埽綝獦蜹屎倎刄仠蘴娔刄彁扔愒劄佑穸氕叇忱蚔猗噊煒蚔甚墍憃苘甚墎判欜蔑哇俑湐怋冄彡湜挑卄澑癨树咇御艸漒啈恢剼漓噉炢蚤猓噊烣拘眔埏灲劄欋則潡癨昇僃漑扠明劄漡晨欐叆侁癴氐吆瀒劄洐合偢皤琔媒猃亨瀌剉允虴标僃潡扔攄係绡剄挎刄弑剔挎劅彑扔昏劅羁癰昔媕句狔砌匊懤嚜渆億忢扬昄侂绡幐怃侁纐稸弍凃滠蘸怍刄企剈帓媖瑶歴砉勌牔缐瀅偄偂芸朄佂廡晤愄佁源稸布企幠爤夋冃滐稬夏塖瑶证爆凊投坉刅倄聳廜茄佂廱窐猃佁庐虄愃企幠爬尃仁乀昜啇榤矙葺歗揤硊璦睷滤硺璦瞒璩墊璦瞝矪梚璦瞨硪梚璦瞨硪梚璦睓子扴蜹屘夐荅螉灮嬌茦垹薃嵑狦蟝趒憕蓆蟺妝換畸怒岢暝藨琶婓屆傣仌繟孉烳曘蕮嵇惃曠襻專肓曹互峌元服喖憌臄匍嶝憌臤歍当屆仑芌煦崊休蚌硱幈澂嚨碌忊形嚤碒峊潱犨纖峊瀢犌芚峌倳仐繓居庰晐杦幉缐牘楸忊侀虘榌拋澁剜榚把羐虜榒峊澑么涖峈羑幤杝堃繰成恦幇滰渘彼拊侀舤很拍澁判徝族信券庢損瀡嘰庖峊徑丰嵓喂湐成关幅庠樔劆拋潐稜历族信丨咙析悁券垤析悡昸垨暏傡樸坹滧衺璦畻抖厕佁幻抌憣绠虹庉佒皨硬嬅绠癨污处庀樜慕嘂湰昘咉獨袚璦瞏晘瑆玥瞑枏扄挑劑晏怓亨碇捌往詸汻悈漐稠捹嵅绀樜喟盩袚璦瞞槛蕗揕莞槓勔茽妞樔焓曘蒛槒僱溌熒枏怑常枒攌彰舠喧硪梚璦瞥汞痷谎媥汕捵歑护汖凓苰誤汗划庤碠汕慂剔梞汓僱樸媩硪梚璦瞩濢暘耶掩濘搖厅沩濘戴挕动濘抂誰窨澘抣剬沥漘戢繤復硪梚璦瞩狥坉摖掩牚蒶箕玩犚苔茵妩燚苃廌蒩熚茓庌熩熙猣庐掩硪梚璦瞩畧枹灢暩琛蓶讽窩珜单彑抩玜卓盨袩狛荓芤皩犛荓芤朂儁繀娈伃仂庀昌倃什纐縤各企湀縸娄企満昸射侁満渔射侁湠昘匃儆伀昌企亃亐昌伂亀纐爘刃仁乀瘤吃仁乀帬夃企乀昐夃企乀帐切刄翁两儃仂开縜刁乀満樘儂亀渰樤吂亀縰娤圂什縰帐圃亀繀帐刊叆缁帰吅佃弁帰吂亀湠縤刀乀帠昐刁乀帠嘘吂亀渠娌吂亀渠娌儌喈估穀圇倄估艀圃仁亐爸圂亀渠帤吀一帐刐刁乀帐刈刁乀帠嘈們嗈弰舤娈傅伱两娃企廀舤娂什縰昘圂亀渠嘌匀一丐刄儁乀帐刄倌唈弰舤合傅佱丰吃佁绡丰吂仁乀爤吂亀縠娐刂亀渠嘄儀一一刄伀)~";
+// grid_3p4.bin: 343 points, 6 nodes, 1756 chars
+const double LV1[7] = {2.5, 3.5, 5, 7, 10, 14, 20};
+const int ND1[6] = {0, 1, 2, 4, 5, 6};
+const char D1[] = R"~(砦盇蟂疛瞘盪撑抁欑砹璊昸煙蝺吂涠撊皹桹膊慧柃対挜浐嚙庙肓枃澗耠婱犛縇籅籥濤厖吙媏沙噕宍湭巖儨弖儥汔獷瀉稘掗腴篝挋嶝牂玭弱悗畓枩均怉傄室蜗戚侳荴茺傏參京襂埖習缼栣憍僐艘氮幋纒噀洕嘃缐溄戃劁缰嘘刁佪垨翹繢矦衪携犁挝堹猚炘煙膊呝梀瘧蔲砮撞炓柔从檕淇呩忶圦檆朰聊噼橃瓵瑅獻濤勀侺咏朘懷砕煭搌琈彍螃坕蓇潘晒旕昤挬奷嶝璳欩剞婒挔次荪圊撑櫘謊廎愆滱帺敎耵纠摛姂慒穬瀮夐烔謸挝埂兂剹传咇罀樴帓剃缠昌倄佀梉砱豰矦萪栺獔湩剧悌蚙皙螂碆孚珨埸乲汍畢蔹桲塀嫃睒柽璔浢得塌婙犀嚇缲影杤凶谾啻澌玆庖卮没向澎六惂薕殂倾气荦绅蕊旕恅圕萗寝扂玭弊恏揦眜葈娚懂宠摃峗庒譀蠹攊倥窸挭懍庂纭偎哈彂亜欇嗐慁虨愍侄伡刼匃伀渚灪婾権萩粚玎挩嘔柒焸瑨瞆氶漪珖砉谀檋疓柙柎檊希绢柽讕丆杈玘婲狟在澽羑摤喴羹獡濣虣诩牓潛搶今剘彠茢揥洷氛侈坜奄掕悗欭弾宝璵蜜罈條护媡坩屉匁竔表受悴坰謼傉膳佬欬懈群蛐笖兇爒蚼圐嚇绱技弈噅丱嘜愂侁丐撢梌涜吥悞瑆瓩案蠆熙尝垊塞审柊瘅硾溋玜蟤萪歀嫥柁翽瑽垥嚗噦愎摃在濱婱杤擹份覇丣虥滉牮潉斨幡煋晕纸宴豹溞吅曅慬毒灅揘敟歒払围填梒儅蝄蕇桑倳羠搻敊库杀衃屗僲潬瀮孆罒笈第懓溂橴校嬅俢伄洍俄伱剈吏什湐帆皚焟硷偮瑢督獊怆杆欦堹水蚢烨昆氪洪瘥玧菎汿畢柉挴橲津哶曍罀瀤绢柭粒晆摙吝朌爙噧瞍慭愘困倕昿漑愥毥悃掛号潔玂惍蕱滹削殂芖窥弱斑芆矔父桐臓牜癐崌咅苬蠊攆腒媭楂埋佤誽尝奋瀠狐栞児彑訠渡刅仱剈儇勀湠帔佐徍焢庌桅媍熓狘耲媉判獁圲宎熕危樲屔厵殑砮屔搷垑耬屔搷堉硢橕牣狐穔慔匄拤茺慎芄朕匲廐煵佁帮峑抄捅戩峑挅彁焤寐猅箍敭炝狓蛬蕣斝狔茌詐抓拔茍儲徏燤茙吮峏燣缹急寏牄蛹戣媏勔蝉咅猤唄仰襲橢蕤苸詣栖甔苸豆挓拔茀谲嶏燣蜀谩寏凣蛱嬤姎臣蜴貙盦暖蛸誄爥圆漀該殜晶漀豣桗玦匀豉擓戓蜴谭寎臣蛸谥始脃蛸誧硨眸垌貗瘩螘澠貂烢蜇构豪淝甗睨豣檚厤茵佑挓狔劬谥始育窬禩硩螨翽榠硪栩俩皗痩袙俙沂牥嚸篅孪淝甖澅佣梜厤茴豉挕狔勄熎殕戓苄熟瓝萤滬肨硪撅匠誩硪梕蛨袩硪梚猰袩硪梚璤袩硪梚璦瞆泚琥挹侔狟咕挡侟盨甦佑妥硪梖茜袩硪梚獸袩硪梚璥喩硪梚璦瞆澠啧枩炑狠蕦獥岝瓦薆羁枝盩矶譹媤硪梚玽喥硪梚璥憨硪梚璦瞑牡癨柭蒑燡疷枩炖猤蘧澥炝瓦蜷坹抝皩硹讽悠睪梚璕沤硪梚璦瞖玤朙吚咝牡癨俙蒝牤嘧蟝膝猤蜷澽玝璦螹宽沝用蠺塭綠皩袚璦榝畧杩框徝牢虨栚亝牢暘培蒝牤蘧译羝猤蜸垽沝玦螹屁綝甦蠩豾傝畧柙葶撝牤暸栚咝牢暘琎傝牣蘧诡芝牤蘧诉箝猤蜸垽綝玥朹屁舑剄弑丼嬕剅彑湠挕卄価蚈瀘咈忒折眚嚋兒蚤眠墎凄仔眢夎刴欜蔖喇濱癜愎剅澑湜挒咅御艴栕嗇徂亄瀕噈炢嚈琗嚊烂蚤琗嚊烣拘稙城聒媄洎匇澑艨栉冄弑晨树卅彑癴洒吆澡檄瀓咇怒晨猓咈怢皨瀙婑芲芌焎厉愑虴栉冄彡扠昇僃满剐挐劄漡噔昐卅彑橔栐劆侁癨攙嬔菥溴砎厊懣芌洉冄忢扤昆偃休晐挆係庰虄弎刄伀虀挎劄漡噈怔嬖搶歬砌匍剔笄焆儅偒誸栅偃休穤挅侂庰虄帄侁纐稨尋凃绠舰嬓嬖瑷侽欉勌抅孑儅偅偳廜萅佃休蚔氄佂什虄弄佁源稬尃企湠樜塏步埪墖灢棦硺璦睻燣袊璦瞔畩梊璦瞢矪梚璦瞨硪梚璦瞨硪梚璦睞嵑若睩屢嬑莆宭祻導玆篕袏巑狦篪亝憖璶簂垡撚薗谂岢曝昈琺嵞帇焃廐聦嵊慃滠衻师焃滴變嶊炣漁冔弌元伕喝憌冄囩嶝憍臔欝兞帇漂嚨硦帊彲媨硼忊徲抨福忊潢媨禔巊澱誰纚律耢媌莝憌傢竀硦帆滰牤浰忊彰艤涃扊忡乤涒捌羱剤涝捍俑剤殚巊澱噐炚憊濱幘杦宅廀樘扰恉缰縤抆手濡丨抐斎忡戴憝枏恑常悥操瀱帰悚崊澑嘸幞埃繰戔剶忇滰樜咆扎忠訤咐析灑戴垞枑肑戸妥枑肱湀妨暏悡晀好物梚璦瞇揗珥譽消攏刴弌蝻戌怂蚨硰庈潐虸汧嫅绠瘨桜圃満樜喑畩碚璦瞒朚撗揕莒某犄笕劒某烓囐芋攌耑暌沈抋彰訴杺庈廰瘠嚟睪梚璦瞟槝敗搎冞毓挅匽媞汔焳櫤蒞毓愒劘熚槐烁湌枒晏們嘸媩硪梚璦瞨浟瘨尚徥浖叅潩接浗凔伍冤浗刢溨碣泗凒扤檠沔焒乐嶩硪梚璦瞩濢盙偆掩瀘摆垉炩瀙剴欝喩濙劳劼粨瀙勃媀沥濙劃劄抩硪梚璦瞩猥杙摖掩狚蒶箭玩犚茄蜽岩犛匃櫘蒩烛匣皐玩烛匣纠斩硪梚璦瞩疧矙葶殩瓛蓶讽肩琛荥杙抩琜卣苴覩玛荣芤碩犛荴亰朂侁丠刄七仁湀师七什纀渘儃企乀稬圃企湰昰娃企湠渘娃企习樜匄億亐娄丁亂幠娄丂亀繠昐伂什縰樘刂仁乀帤唂仁乀帐圂什繀帐刈剄缀爐伃仂廀爐倁乀湀希倁亀渠昐儂亀渰娘吂亀渰娌唂亀渰娐儋吆缑丘儅佃廐縘儂亀湠樐儀乀帐希倁乀帐嘐刁乀渠嘈刁乀渠嘌倐嗉佰舰切偄估舰刃仁亐爤刂亀渠帘刀一帐刌倀乀帐刈儁乀帐刈倐坉佰訤合僅罱两唃佁滀縤吃什縰昘吂亀渠嘌刀一丐刄倀一丐刄倐嚉佐訨合儆佱丰吅佂弁丰吃仁乐爤吂亀縰娐刂亀渠刄倀一一丄伀)~";
+// grid_4p4.bin: 1296 points, 14 nodes, 11720 chars
+const double LV2[6] = {2.5, 4, 6, 9, 13, 20};
+const int ND2[14] = {0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14};
+const char D2[] = R"~(砦盇袝纛瞘盪撒佔欦栴桢炍尙蝺吂涠撢肩桹膊慧柃嬁贜獟恨瑑聦呤绠翲悈橛縉叭粐条莖吚嵌朞癕宁筣巡厄搌聒池灖翡浗名蕵本夾捊敤廅荫扒珣枨片恊咔漌敨哎挀盕欽岗儂竰画庖習婨穏憍你芴氯偋爒噀洕凈亁劄戃俄渡娘刁佪垨翺異瓩琨袖犁挝垚嬚炘煙膊呞乚痨储籺摳慢矙绍井淇嗖栦戦檆朰縺恼瀜朖譥獻两噴羺咏朘斣谕煭昔莈廉卹滔瓅檕浸掠煵扡奷异臢珙彫婒畕蜥硇怍灆牝儨栏憕丩欰哏冥绬茣壐玲檰欖懆狢芼舉妃怡蜄帟午亀詄演俀缡娈各乁梉砱豰矘瞺栺獔眠执悎朸皙螊努宗撧蠈偸檋慧杧屲塀嫃睗誙警猢得塌媒世暇聅婥橤哳谝規澖儦徺匥没吖婡妃僕蓘埤豠气脕枱塷圗艕揙怗歒庣苝剫塔揣侩啈桏倳枠搻敂惴嫩橐嚎惥穔瘭倓胂匹倫孅倀橬洝幇灳幌栆劄伐舼匃伀渚灪婾権螺枊岥眠捇悎杆琨盖櫢澗渖砉謶女疥炨硵丳甥时暘檔灟攡瑌媒瀟厗厔岑愛蜇簞吿燙哠倕衘晌琸徴獠揠薕婡虖椠犰筕派抝艔矘罫恍艅蟕彈忚灁檥眽宂璃缌縹敔冣窍樨厖腒訤礛庈烢缼笕憇恰溄舠喆濴剐唍刄弱嘘崃佁丠咢梌涜塶塮璎睕嘚弙芣尦栩澜碡煥莩貀檀疢苙葙膜炃焴俶捿垙睈牥耀狃圧罦嚑愜摖豀趇泣虣坡牮潉搗砐晣滒蓐筝螂嶘喅存罬毒灅譕恶彅芗掬堷嵌另眑彈塑蒓續葨厎菐犽儹岗匂坬簕堋庄誱尡床腑幬渇啇舒橸舓咁漡乄嬏佀繀嘆皚焟甆增榦挩曪怅呴盦憊塡疍癊睵碂涀疓忈籶摳產爃娺挦淟摩幦坲狃圥爁誈橤拆掾庇州蛸曉晤榡恗砑漘曒荸娬豭溞斆仅摓悛啲录萗旒挧挔譫傚犃佸蕑弚扲嫱瘩厍珔嫭帹攎溒溼灛妅徳抭倭倓胄蚄戠俇恱謄水勆湡噀弍凁帰师侨璣嗧傞楢瞩捈袒侙徝垊属客尢蠘倩疟玨傧菎汚淧暙摱孲津俆曍絀橤蚂桉褙杖擩吝漌冓圆怙煺燏莈掵湓媡卷琍搥丑擇漭恟捠澃蟝堷殂艃匥祑怑菧抐睪嵚彳曀詨傐膳獴衐堆耳捰祂擋勲檵尖啋胠犈栴喅成艼嘐凄怒丌倒匀幀橌吅砦盇蟁炧瞦荊携犁徝堳灦炘柣栒硝梟瘠俉蠭宝玢甹縸腀浉渇豔枉猃唩宙詯犢唙叮幙榡萖挲嶆沏虖侑慭曡儥漖兹坔瓅毡涂名荥揝奄像畢獄罫斒畔櫙坪園佶猌癨嵎挅舨椺娏參拭偛壈聴誰欖咓烓帴簉姐忢噔帟嘂仱劄戇劀缰昈刁佪垨翹繢挩衩粕咎眠敊層蚢琙蛚呜硚渨埸籹宖櫇埘硱丳獟聧船璔灆攩娰乼犢唖警徐泓员殺嶆巘摈揨聘招搶倐玃汆却搉穸抂菵札挾寝艇曄睊扚蕕蜤片梍犁殤譃傊咃狁幝崎澳竕樣壖舡朼甬憇惑皼圴妈滑蜄挟刈亀詄演俀缡娘倄乁梉砱貧樦萪梖屔眦昔桡芣尣杸粊澀炙蟲硙讠疜莧豶垕甇嗇垾才橤葨滍互泉瓠螆彥呡莙候爌沔萶落婠潀厈廽卒汕蘳垱浖氕慸嚕蕋弊敥勸晊棗犔櫙噪僝愔室瘤屔咃荴蠼哅膳捰縫傐玲媜穏商狢苐搮姃忢圄土刅怀詄嘡匄渰橌吂企帚灪婾樘獊欚璥瓣硈勢枣欦堩氶潧渊玪偾妖櫧狘硵井甌翇讙讔垢攩婥朎儤皇缱罥牛蜃谝規澀儥澒卮沉晆宄暃惛捰篤貂昞卣卍穷悉单诙怗归敖稨譪怌句匝刷案臆湘眻敍溓眍樯戎急窠簕孋徴訠祂夓瀑庀甝嗁舓幸栍勄休嘘崃企帠咢梌涜塹箊璥熕塈匚枘欨膈葞炋癢瘆檪涖浨埧孩趝灇坙翱聯慥唘澘膓帞绩嚙籡牙徘武庆儙匷瞍湭愣虐你趄彔疕氍稲旕疃歖倥弝芲獄显殚芥蜝圶怂蕓厩兩堉冕侠衝嵆臁櫔褰攊纤坬産夓翑皵尴压烰艹伢假缁技崑噂佁嘜儓侀湀戆皚焟甊汭炦睕囪怅咙欦堳瀶斢烨昈皩疟浥砉蟍桿畢忉缶捲洛蝃宙羈狃爇箸瑡犆朖搝杓爃噦币衠楘蛴耕単巔癇狝浬揠脥柡掂弊恗欭彶斆兣螭啊恒咧戬罃堚憕亐楨岗慓苬詜及脄嚝椊夓耱癵尭嬃形虸絁嚂弁詔渏剂們幈儇勀湠帔侨瓩螪撙豔暑甈耆岤欦堹瑞瀸柨昈菎撋墖狚偺殟淥暡缀膜果睇萦愲爣葅瀖呺榃勉叄赯泖晲晦恥洐苲芄蜩倍瀄蜈稔堍悸游奭氘愘埤豉歏庣侩慫旒侂托焼斚払垍敋满丄睙捠殝署徱唯做叓筅剜妅急竩帷勇舑稜欞埍传昼栍刄幐嘄億救炑癌恍床怱癙儹婈老竬脬囈考抰爣嘈兒溌洟呓熒犌栖忌脒纰猻嫌愓勄茱嫎憓盈缴岎熢蚼舸岍刳源焠咐熓嫄缱嫌愳猉倱婎扤歀稳庑芕交艂忔匃竄猠嘈兣滨蠳岌愴歁呉夌扵佁椥嬑猅殈猹忔萦嫔稤嘆徣囌蠺岎惃猝慐戋冄螁煢坍劅筭焥屔叆寄茨嘇羑暸缴岎煂狑呐拔偓漹湫曉内侍罱囍劕羍熀琕剣噵粇懑腒漹楍廍悳謄豃孊膳蛸褵墍憳竘符梞狔滔癢歓艣绉啒慑舣拤谿徏慣拸豃峍烓蛸褻嬓猣蛸茭憓拔盰茸慓护囤缾弓戤嚤豃徐燂括豃嵎臣蛸褵夎爔茔謶婏狔蜈蠥嶑劄月爾廑牤暌褾廑牣竸褻妊煓蜍儻宊懤茹吻囏爴蜹倣峐艴欘渶嵑牴櫔褶孋偣囸谻完恓蜑呂峈膴嬝噆喍燤歁帚嬎舤漚沩璓戲萶涒慏燇簹譍嶏勵筈谾宐臣蛸褶奏燣蛨芌產勓蛱貈犔扃莝莇捏致杉浍嶎膓蜴谾峋懣蛸谻殢啔苸詫歡茣諽慟歓懳苡孛慏燣勹佁嶏炃竸谾峓拔諸褶徔猣蛸褸慔狓諬眿慐戓蚐褾嶑凡蛘谾嶏爳蛸谻嬎燤苸谻婏狔勸褤嶐拔匄氶嶏爓虬舾嶐懳拸褻嬋腓蛸谻宊凣蛸谻喎臤匄谙嬏燤茴搭峏牄悦瞩瑓慚傦疖抒蜙豢偍弟蛈埙弾当挥廸褭彏爓竂涩盤拔簾疩璕牘呦璗擏瓷硚乒嶑狕譈贾孓戓蛸覑甥旤茎侖瘣玳螮厑牖臥殺喁抏煴捙摁嶊刔勼谾洢喆謰豯沣畔苹敪歝掳謙潦枓懳匕卍慏聓绹佁嶏苔茤褶従拔苸谷当拔勸睅当戓蚌萾幏臡绔襁幏烔嫼蘵妍戴勼縰奏爔匄褥峏舔勸朵峏爓虐笰嶏燪璦瞩玑梚璦玖慧袚塞偍瑧睨珙厈熟敦櫱倾巑扒貦瞩眤狙蒦瞩疓曺炦瞗慠枺恶前殢囨濍似巐拓諂涩瘥嗤萾皩瞣狘呲瞩珓擸灢源慘畘倅虌嫏舔匄纗甤昶謖供瓤薤掮嚚珢狖埪喊炓抖枹虞巊懓謄贰瀣畦讈詯沢唶曹敭沟擤笙硦榛燳潵杞懏聓櫴贿娏至諰蔭崏至諼紳嶐拓諀眼巐懳窔訽嵏儁暴縰夋墚璦瞩甪梚璦疒砪梙豝誣硨杈珂涤玢旦塊屽殙茺璦瞩矤硺璦瞩疧梚璦瞒珪梚瑭袏盪埈螵貒犞瓖梦瞩瘦瘩蒦瞩硤睺璦瞩猠柊璦瞄殤矪灡虢沠瘧睺熩略嘷偞瞩皦喘呲瞩皡哸肊瞨炘痈籪桾揙蓧莹沟癤瘷螊嶣眤蚆柚悛畤啖埲妗珜萧柕豸桒搕睹汉犢啦讉慾熣疦杵灺沟擕歍硭樛菤枑桞摑熅嬙摆姙茓剼挒捒惲抐济庌聒皑丸婌惂諜缬夋傣抠猥均蚪獽張啠枅譅倰抜捤蛼聀憓犓绐襎巏膓囕儻寍悺沦睖幌垪璥氿庡硪珅乂憜攔蛬襃巓燳竤茿峎膳沦瞩硔党悦瞩斓蟊璦睱憣梚璥癇憜攗次伴憎膴勞瞩硪梔炦瞩硪把撦瞩硒堊璦瞩急碚璦睐彐拥歔薩硪梚璦瞩硪梚璦瞩硪梚璦瞩硪桺璦瞩硣袚璦瞩曔愒庈桑嵌臓嫅偂徏戣蛰證悐犣拱偉恒焣嫵偅嶞螕蝄贫欞珵漤蕑斗猤狵偎掔犓苡噎憒懓挅噃巎杺瑭汁巡坺玉噃欢砇包兑斞珤漁倿憓燳諔襈峎臺岦瞝憒坪璦睱幡堊璥缻欤梚珅佉揞畵仼荁巒刓粦瞩硦犊咦瞩硓睚璦瞩揢衺璦睞浦梚璥挻峔另囮瞩硪梙璦瞩硪梚咦瞩硪柊璦瞩硥梚璦瞩泦梚璦睘恌胲抉圱嵐爣蛴譊悔挓嫹彠托儓蝅牠朌凕卡牜止珥圈聤斗茕勵偖掖匔囍属旔抓匹摘扒惴漹彋廢埸謹嘿泠螕蜹啤橠菤蜜譞橗狤蛌赗憓狣份屈憒垪璎奖峡垺璍缿氣蠺珄赤沥衧匠詎斜揤勉佁憒冺撦皜煓睪璦瞠戡堺璦睞浥衪璥灤滦墚獴艀憗璄炦瞩瞧蚪咦瞩硧睚璦瞩硡堺璦瞩淦梚璦睪炦梚璥時婌惲弈爾悒犣嫵塑搘儔垁筤楌戦徵艴姐瑆矑色沗猔囑彞曔挔囵摕搔抓匹束扔愔蝙浘扊爴蝡晑渦昴蜸赪橢珤蜹彣橗狤蛡属斓獣匹屎掓炣諽屎憤硙篽氿淢瞸譸赪沢睇包彳橢古蛍属橗爒眄赐憒堊璂掀憤蠊璒彎浤枺瑱汪湥蠊役晶沥坕曅佈斗犊璦皜獟柊璦瞣燤衊璦瞘淦桺璦癴炦梊璥牶沤砚杠謱婋聓纈豊扒焳茉彤朌戦徵硴婒摇念謱恙啈忽穱旓燳彅汧搔戣孙坑扒愔蝡晑手艵垁牘坐茖侑晻瑟勤蛽牨滕狤蜩煱斓狣嬹屎掓焔欹摖掉懴蜹摖燧蝷潘赽炦昵蛽牳橠菤卅睢斗狣匹属戓炣謅屎憧袙簭艎犦桹簩屴炣蟨睁硶橠蝅蝅聨毝茂謁佐斓碊璎掋欧墚璚暆漧蠺璎塽熥衪灑签炥埙罅聧毣日勌缯変儱盹彑悌憓蝅牤婐瑆莵舱恙嗘怐罉期晈忉罟彎儤玡煑庐焴蛕坑恋芔睅彑妐芥澑渥巒掆徑覗沓犃讑羃斗狤玡罢摓焔蝹屖憋舴蝹摖坎芄蝹沏痥啅国變瑢狣讑羃沓燵厕汷揓焔欹敎憉憔匹屎疪枨徑岄瑨螇眹芃橣蔔螑葱橜捥厕癞掓烣笅噎憪梚偖剤甪墙蠽蒄瑧矩濅芈炢睷段襱橝蕵厥畨毒滠蘨嘆伃滠稬堊冃滠蘸尋冃滠証夋冃滰訨夌冃绲婌導僂澑剀帑刄缑剌挕剄弑扠朐剄彑湬尐剅征溴椐凃绢婠昕卅彑扔搛啄彁扤椞刅侁癴洎匆御虼蔣各缁二焣嘆忑牴砩嗈罁溌琟坄侁詼氟分俲扼洷囆徑婀砪墊瀱艰焲孋恡犌耸孉潂亨耩垄忒暘琟寈羑牤愪墋惢芨渪寎冃噤砷崐憁犨蔼幍潂媬茵塄濡噀夆劉羡湄娐哆羁帼尖呆征娬挘吅估牌挘勃繰爤堉侂廐蘸尋偃廡乀将僄休剄后刄弱娐夎剄缱穤弐凂网橔弑刄佑扐愑冄彁扔戋剄彑扔堑剅佑抌砝各廱窌渘卄缱艴欕千澁牤昕儅征扜昋包彑扠砭囆彁亀砣嘆佑媌琣商仱芈焠呃澁艴欛儅征牤朣妊濑湌渮墈翑扌砪墈翐誌砪墈绲二琩囃侁艴焝匉脑幀圚嬑怡牄栴怊耱游氮墈翐穠甦囈乡媀瀠呁绀訬堈偃罀蘸夋劆漡剀嘎劅佁娘少包彀娬弓卅幐戜吆企买爤圉伂廀稬夃偂绠蘸儉僃漁丌國冄休扔挐冃漑噘弐冃漑扄帐僄休剄弉冄弑剄圎刄弑婴減卄缁扴欘匄弑湬攔剂罁橜挓傄彑扔戊刄弱幐戣嘆佑婐焣商佁亀焝吅廁湴欛卂漱湬椘傄佑湠挔埍允嘨栾打恱湸豘損聡盵慙岊满諔褪墁佂嫈砡促仰訬圇勆濡券園埌彡刬性嬇澀昸攞哆丰穄昘吁幐樜各佁纐縤圅促张蘬吉冄漑丌國剄弐娘夎剄帰帔刄伀繐戔吆仁幰爤圃佁纐稬倄侂溰稈刉僃满剄帎冂绡乀導冃滠虀導僃满丸專僃滠蘸吋冃满丸戔剃绠詠昕剄仡扠挓刂缱扔我偃缑剌弈僃缑剄感婍儐虨艏搔态蜕湡攋忤孵畞密燥孹椷偅患櫜砇促廰訤唏咇濰蘤戧嬍你牐缾嶇溑庤訽嚁亱噬焘佁幰樜刅俁绐舤匇凅佀蘔圏喇漐帤怚喅丰昬尒剁乐戔匃企幐樜吃佁繰爤儅促仐稌匈元滠嘐吋僃渰娌刃什繀帔匄仁乐戔刃企幐昘倄佁源爈億侂庠虀導冂满丸導僂绠蘸尋傃滠蘸変冃滠蘬刊僂纰稼氧婌恱廑存撒群宅睫摆牦厭神咑理瞩椒崔菥筬匇儃绰舜娔喇濠橌猴嶍云廅升崂彃弝嘽偄炓曼訅佁幰樜匇促仐縔唌勅佀戜崞埇繐版猩埁云噸猩企乐戔刄佁幐樜刅俁繰爐匇儃绰帔唏勄渰戠嬒厀繀帐刃仁乐戔刃企幐戔億佁繰爌刅係庰娐匈偂縠娌儃什渰娌儃亀繀帐刂什繀帐倃仁乀昈儃企湩箔脤咄袚玽搴囪梚玽中硪梚玈皩硪梚猦瞩硪梚瑍獅尌恊炥腜忋梚璥絇帪梚璥絍硪梚璥侩硪梚璦慥成膣咖睳暓冊璦睯懑袚璦睿峪梚璦睇硪梚璦瞓柔苄嫪犩櫘猃蒦瞩槕扺璦瞩槎袚璦瞩懪梚璦瞩爙菄缌袥砝琤绶瞩硛茔貦瞩硛膺璦瞩硕梚璦瞩硤呕朱儸睪啥缰让硪擵匾瞩硪擳粦瞩硪拺璦瞩硪朶挔蘱圪増孱唭硪梖謝亩硪梖謶瞩硪梔咦瞩硪梙俑橐愐蟺珹睐嵪墚玽嵇硪梚珼覩硪梚猾瞩硪梚琱衧杗匉蒖偲攑塊璥赙扪梚璥赀硪梚璥梩硪梚璦婺欙葕聲溂檗苊岦睿暔梊璦瞂忪梚璦睢硪梚璦瞌渞甖殖殠溝珴肎瞩淘獪沦瞩淓袚璦瞩槪梚璦瞩爠喧厝玝瘠甕謲犩硟营梢瞩硛苺璦瞩硛袚璦瞩硤葕伌蠱睪收地蚩硪擴謞瞩硪旳粦瞩硪扺璦瞩硪曇瞝獜戧桘埉橄眪梗譥復硪梗謂瞩硪梕碦瞩硪梙倝衺柙杺倕葥戧梚琉灖眪梚琽垨硪梚玾瞩硪梚瑂喇滞疩汮塻杗埚撢偯暨袚璥赕眪梚璥綨硪梚璦徐濡蘷硶憊沜揹蒂玂様砺炦瞏捩墚璦睯砪梚璦瞕爤噸毪殛炞甕豶溠淜琪岢瞩淕桊璦瞩淩袚璦瞩狙挴缌袤硜营件瞩硛荔沦瞩硛膺璦瞩硓袚璦瞩硣喧徝獜用噗坽媣硪时坆皩硪昤沦瞩硪搪璦瞩硪月氞兺沥螸短獜畩梈垽炣硪梗譖犩硪梖貢瞩硪梙摖庐濡蟙尪乶杧柺摍腢盩梚琽掣硪梚現璩硪梚瑶殕牤噹葎妃沙蟙籮偳榨蠊撦偙盩梚璥趤硪梚璦殝略朙偶憍滞甚屮概殜砹貖獿槩塚璦睯眪梚璦瞐杗勄嫪玩殘狃蒦瞩槔拺璦瞩槎袚璦瞩捪梚璦瞩焠喧厝玝瘡攕謲熩硟营梞瞩硟苺璦瞩硛袚璦瞩硤月氞兺畤蚗矅涝瘨囶變熨硪曵撒瞩硪擺炦瞩硪柙葖徐濧朸簍衧畦螸埍粣瘩梘坦熥硪梗貒瞩硪梙葶殝獤根尾啺沨螙尩赲盧堊倉綣瘩梚現犥硪梚璎熝畧杺屆庇滞砹恎墂涨螹籭赯眧蠊撥趤瘪墚璦幥攓刳炖獾攑臚璦睯打袚璦睯峪梚璦睏硪梚璦瞐滞甖殖殛溙挄肒瞩淛荪炦瞩槓袚璦瞩槪梚璦瞩獤月氝袝狠蕦捾殠瘣藶墎皩硟荚悦瞩硟衺璦瞩硧柙葖徐畤虸審羣瓦蛷诊熟瘩曶貒玩硪擺悦瞩硪栺屶殝珨蜈耞兺盥圹尉貣瓦螸垾犟瘩梗貒溨硪梚悎熣畧桉偂喇濩坉尾厂眥枹尉膤用垹対璞睩梚爸尊倁湂晜導儂煡虘帐凎倱牜愓尊信虤慀壈忡虔弐兂纰癸愑剄缢婤昗呆肢媌焠嘋炢皸砣妋煣曘砐刃滠蘴昔包侁湤昛哈倱蚌焪垉瀂盘萶垈胣狴訶冃滠証崒包羁牸戙嚈瀢晜氪媉炡犨萶屋翣曵呇崃滠蘼崐劄潱牸氒合聒暘愢姍炢癜砶崎惱蛙乆惑滐稴崏凄伡幠氞分倢折琓嚋脢芨攪宐凣乤簹徑臁抴搑僂买縬変來翱晄帋墋瀡湈崪宊濡橀漶墇潱婘縝呄滐爸導冂罡穘戒則灢噸攔喋炢婸攞宊炢婸戧嚇潱嘤少剄弁乤搗叅伲媈減各肢皨焞勋炢皨焑囈濡牌圐剅伡嘸昛哆佰詸瀠喇漂媨焣嘄肢皨砪凈瀡虤攉刄潱橐嬗哆羱游氢囇翠誈焪囈仲媨砪墂翡虸朓侄伡幜愋叆侑穬嬞喈翲临氣墊瀰詸焪墊潓嬌搑偁绱娬夈佁繰昘刖厅漑丸氣囆佁么瘪喆伡盹夦善溑剴弐冁幰縤変剅澱剄帗喈羱橈愨墈翡橬衈妊俠穄猖匄湀爸導冃漑晄弑分翱穜怏喊信虠截峍傢娤弛吅罀帤導刄亱剘戒劃影穤昗兆倡虸昐囍烢蚠圑呆征渐夎剄张癄搖厅亱噠朘參佱虸氞傇烢蚬瘆刅羁牠儊冄弡嘤帔厅潰癈昛哆纡噸氞喅愴漌搊促佑戬圅佁纐昐儅佁幀幄弑剃溰艠椘劃翔孡昪吂归拄弎佁绀訬圃佁繰昘少剄廠蘼昛哅伡茍晝宊滁抜脚匁庐詔導仁幰爤圎冄弑丸嬗呆佡噬豔擎胠穔申嘆幠牄搑剀繠爬夋僃漁剄尋劅罡晈弪寐兢稤弛垇濠帤少剄渰昤夎冂廠虄帐傄伡幐怉吊膂蚬刎又濡蘌圎剄漠嘐圎冄习稸帑剂仡噈戒勉臤滸將促网戤包俁繰帐包佁帰娐刄什绡剄帎僆爵澅昢促耓勄帅促仱两刅俁繰昌刅佁幀虀弐刂翔瞅癡媂当勸谙佁绱癴射佁绀縤億佁幠昬導冃满茡歧旍滁盅倾嘁庑婴猑企幰縼夃企幰渘堎冃滠虩乔斖膀穔笹崈湠繄欠厀繠爸弎仁乐渤圉元滠蘸夞妎刂蘐尖嚊濠娤少叄渠帤夎冀渰帠堋侂溰縴嬏坌臤嫌匇儃缰訔包俁繰娐包佁丰帐刄什渰娌儃协獖厅怇准灓劜匇促仰訐包俁繰娐包佁帠娌億仆犆容籝俅恳蜔訅促佑癨刅俁绀縌刅佁繰嘌刄企侤瞍米枂徣嬝奁佁缲劜猄佁绁婄億佁繰爈儃企幑眡潭椙溑盍卋嶁庑抔縪企幰詔挃企幰爰倃仁乐晔豔料瑠牔笼幏乀牄欦墀繐爸或仁乐爬専仁乀昘導儂庀庨搐刃滣溄椓匄臂皌漙呏傢皨漙幋炢皨欕嬅漐縠唍儃亐湸甘匄廢盄砡厄胃犨焛勊熒續欔咍勑橄圇准什爤匆傁繐幠氠劄仢劌眜厄彂皨漛包慄漴搌侂网瘰圅侁纰成分侁湐幈怘各廠虤欝匄伲櫹噊刁溠詔昉佁湠樨匄佁湠昐儅佁湠娸弒劅什誔舾廏湠昬崓勁幐昘吇企乐昘吃企乐战億企幐扈弎冃滂剘或厅炢劄椞噋傢纰漦妋煓滄琵孎憓滄昴嘇弰蘤導剃滁晸氘厄怒纤琛厈腓动漛囎慒纨漞幕悁艌夒埄漀蘔唍偂庑噘渖剄徒劤氙匆悢續漙喐萆劤朊卉慁嘸匆僅廀爐匆傁繑么搘剃漁穴欙勆爕箙氡促翢狐尅侂绱戤分侁溠戌分侁湀虄弒千潳歍潦捁滱溔眰佁湰稼愄佁湠昜億佁湠昈儅佁幡噄弑刄侱婘椝啇怒暀猦噊煓护眪婎刣溤砸弑牣湠舨垆缰牄怖匄彁繸椙历悢犘氜哌愒纨漙孍愒纨汃搌股舰急叅漰戤導冃漑晬搒剄習扸樖勈肢溌漞恙呃窨娘娐翡帔堏喃滠帔唋偂廡剈攑冃羑穰昖喒瓆羔缋半戴橠匊准灐蘐匆傃纐娐匆俁廠虄怕冇犆柁繢傄聳欝倅侂网蚔刅侁纰訌分侁湰嘌刅侁漑乄愔勅漁晸漡呇恢护眝墎兲犤焱庑舢犨虆懕刡滐眪噆庑噘昙匄忁繸欛厊悒犄渙夋儒纄本孍愒繸赘屋炠織猛哆幐縸弑剄佡湘搖勇态虸椓噊灢溄汊朚打嘴昴庉徰戰怞劄幀戤嬍元漑剘怑内澑繠搞悛唆绤嬚嬒犲戔夒坌传帘唏千渰帔唊偃仠虄怐喒瓷濡看反劥圠匊勇焃丐吆僄羠娐匆傃縠娐匆侄廡剐戓匃澑誔琖啈恢犤椪對肓二荂惑儲盡奔捑羃庨砡呂弡晤椖剆罡繼演垉灢劄搪夌惂晤稱孍惁蛽昻媊滁檤氞啁廑剈或刅澁湠椓哇瀂乸愝垊傒晹噣曑憐艠艂塈庀艈氖匁买爸導冄弑噈弎勅澱湘汍椝咓縴样悓傠樰挧塆乀樨崕冀繀戤娌儃满剈弞慛薧篔多嬔獔訔夕埍腰帘唏咇湀战唋净縰帔吇冃企婌愑儆俲折戛噉炒艬砸富儂嫕剋庌傣漭敘忆儂犄欙偄彁晘朑厄羱蚄愡噈怒晘焪夋偡犨稵尌忣蝠蜲境侂犀漡佃弑剐朐厅潁晰弙啇怂乌模塊悑蜡煠彎廑滑倩囂仑抔昖伂廀虄弎刄彁幐尓历侁湹屬歝戀艨艊愋湰艔甩品幰稸挒企幰爰尌冃漁剄汍槞痘嘬样投拰戬挩寍繐昨怘喁乐昤嬒什繀戜圁一丐刄儃什縰娌儃什縰嘈倂什縐刄伂亀一一企亀渠嘈倂亀渰娌儃企习樈儃企习刈儃企一刄伂亀渰娈倂亀縰娌儂亀縰娌儃企习爈億企湰刈儃企丠娌儃什渰帐儃亀渰希刁亀渰娌倃企湠樄億侁湰嘌刄伀縠娐刄什渠娐刃乀渰帐儁乀渰娌倃企湰樈億企乀嘌刄佁丐嘌刅伀帠娌刄乀帠娐刁乀渠娌倄什渠刐各伀縰昰圇侁丰昘各什帰娌儂一帐刄企亀帐刄企乀帐刈儃什縰刈儃什縐嘈儃亀丐刄企乀渠嘈企亀渠嘈伂亀渠嘈億企乀刌儃企丐刈倃什渰娌倂乀渠嘈倁亀渰娌伂亀渠娈儃企乀刈儃仁丠娌儃亀帠娌儂乀渰娌儁亀渰娌企亀渠嘈儃仁乀嘌儃什縐嘌儃什帠娌儃乀帠娌儁乀渠娌企乀渠嘌吉伀縠帤夆侀繀戤包企滀蘰圇亁源樘刁亀縰娌倃什渠刄倃亀渠嘐匄伀縠帜吆伀帰帐刄乀帠娌儁乀帐刄企乀帐刄企乀帐刈儃什縐嘈儃什丐刈倂乀渠嘈企乀渠嘄企乀帐嘄伂亀渠刈儃什縐嘈儃什帠嘈倂乀帠嘈倁乀渠嘈企亀渠嘄企亀渠刈儃什縐嘌儂亀帠嘈倂乀帠嘈倁乀渠嘈企乀渠嘄企乀渠娜嬎俀湐爴帉企习稬吆仁幐昐刄偃什爜伃侁湀师億侀縠嘌刄什渠帘圄伀湀战刄亁亐爤吁亁乐帐伂什渠嘄倂亀渠刄倂亀渐嘌刃什帠帘刄乀渠娌儀乀帐刄丁乀帐刀企乀帐丄企乀帐刈倂亀丐刈倂乀帠嘄伀乀帐刄丁乀帐刀企乀帐刄企亀渐刈倂什帠嘈倁乀帠嘈倁乀帠嘈企乀帠嘄企乀渠刄企乀渰樴弐企庐艌愇企溰舴各佁幠昐億企幀娈分偁湀嘌吇俀縠娐唉什繀昬处仁习爤刂企幐成伃佁湰昈儃什縠刈儃伀渐嘈儃亀渰帔各乀繀戔刁亀繀昐伂亀渠刄伂亀渠刄伂亀渐刄倂乀帠嘌儂乀帠娌儀乀帐一一乀帐刀丁乀帐一企乀帀丄企乀帐刄倂乀帐刄伀乀帐刄丁乀帐刀丁乀帐一企乀帐刄企乀繰繄愐伂廑婜愄佂绐舴刅佁源爌包佁幐娌億什縠娐唉俀渰帜堌仁习稴娃佁庐稤億佁幠昈億企乀嘈儃什縐嘌刄伀帠娐刄亀繀映吂仁乐昘伂企乀帄倂什縠刈倃什縐刈儃什帐嘈儃乀渠娐刁亀渰帐伂亀渠嘄伂亀渠刄伂亀渀刄倂亀丐刄伂乀帠嘈倀一一一一一一一一乀帐一丁乀帀一企乀一丄企巘圙袂渿榤栺炠詰瓩碚狩覞砪梓寮沨硪惗籺皩硑搉咎皨慜垪炦睚烧碚璥溑矪梚玂撧硪梖做瞩硪懷偆熩硗蚹袦瞩樤硺璦瞋疪墚璦徣硪梚瑆疩硪梓篮梦硪搉增瞩硢蟪璦瞩璩袚璦瞞硪梚璦熩硪梚狡覞砪墖做疩硪朚岦瞩硧碚璦瞩砪梚璦瞨硪梚璤罻疪墚玂梩硪梙咞瞩硪栺璦瞩硪墚璦瞩硪梚璦睑喍熓竉挦宏臓茠氶屏懣牘縺嵏焁暴蘽嵈弢苌謽捇煣諴譜埍燴圹攧宏苔譜然帓拴誌腂憓苢仌譎懒侃仠謾揊煣謵嵠复爄荩縰屑狥诬笹彔号窴虆折冑暴蘽嶖炃曱孏樌凴漹涋嫏芥侂弳帓捶汘虂戗葳婘笸嵏探嫘譂懞脃謵恟牌舥杵疚屑捥论氽慕萇亴怭嫏懔誈脽库疲英字日熄捙照疏拕莝纠库菶殹樚俈炡玐琌嚋悆庘尢墋懱稸洨墌罀艴焨卄廁犈潤垂耢芥礶勉焂莠萗型惕檨戦墋拢婄瀪奏忱剼砭有滑誨筨宅怲芵縶合肢菀脘囊烗亴昣墌吂癘瀪娏罠艬焩揊漑誨筰宆耲皶吰哈肣倬縝堋焈窴欪奌脱帰朣囓瀱剼瘭樌侒溨箋娇肣仂弳嚊焃屘脣墌兡牀娙嘈懑詄洨奛烑犌笭烌俲盌膒嫈胣曞栳堋愳杰愆佅漦窘堅厇摂昴化嘙偠訔戛宅滀扈搓刂幑乍礦傁彡菌褓來倧嫼栊厈甓晸外嘓灱戤戛婆缀版杫垃幑暁脿参佢埵刞充瀈笐琏厇蔃习尖哘傡昸戙有滠扐楬宆云晾吿垃潡葉匦剅濙勌氐历蚲艬弖响潀爔帔憉伐版杰娆仡幦弶善彡籄縝剅澹労欒厇弰蘤刏劌羱两弖昊潠虈撋奇弑晦弭啄澑籄笟匆忕刼吅伄撱瘘各剚聠瘔刑棉滐昐彤垃幐幀渎偁丰螬栆佁伷媰崆佅善幔吅匟劁蘨匑櫏羀稔弻哃源戽礦傁幁叱刕侁彈伤琋侄暄溘崇剢节晄圑昊潠蘤幫垃乐幅虈吂湑吡圦凁缙歄砕偄柤溨按剤愁穀圐朇滐成幫宆亠扆奅垃纑呹嘪千伊嬠砖兄坣婼怌切廠爐儌峆廠爐屠墅仐爺弰哄亐豘脠剃伉労朒冃芀樔刄仙估昔刃椆湠成公垂湐帍礦僁幀孔昊佁丶幌吅伀蘂昜吅传兰記匄渒佐昔劀怆溠昑脶卂湐徰栆佁丸仜崆佁噵剨唆佣匒昼吅焔恱娜压怉滰爕稦傁幀封嘕侁幈歄琏侁杵拘挊佧獓晠夅疒傡樴卫垂湐帎么吂乐怱弦凁繉蝔萘僁桅拘氍佪匒繠尉捆亐成关宅庐戒呈垃纐恹嘪參乚漠稘冂梔拀欐偑甩沂熣徜瞪炦睄滧碊璤規盪梚狮嶣硪梓氞熩硪换嫰贻峘悳缝医很臔伕堽响牄捀蔛宎艔皤戮峎膶剨嘥妆璂稸眮塙煁抨簮很异护簶厃耒犸树兆聲歘愇來伶蚌圆呆蓣刼唜坚允戠次将廰晘栓刂繑婑娎侁幁厸朇侁彇抌娆侅畒舸唆厚允娠唖哄亠成嵆倁幀帍漓侁幀徸标侁幇抌圆佁敒娰唆何瀰蘜吆抜瞪炦睕滧碚璥犏瞪梚珊榨硪梗塺瞩硪攩袦瞩硘悴伜贻枌刄筁彝姐扵卭氮幔猅筬眽悔掵加虅扖蒂稸甮妛煁犨萶榐忲皸葝姆悢蛙弥厊儣曬漑坋烦蚌圆叇畳幌唙坝艡縰樥毑瀰詸獑墆廡湸褞剂罡箸朇侁伧櫄将侅嗤噔唆匟狁訰唔毑瀰蘠搻哄亰扁漓侁幀寸焈侁幈廐将佁晄晔唆佡勁縤唆毐濰蘜呕濧碚璥犇盪梚琎榨硪梘貎瞩硪杺沦瞩硦碊璦瞩晌戔欝塧媑猥坭耶幒荖怜葋捖葈諙啕教曳朑恝杚兀誠簮母忢盘蒃幈肣曚儸囋腣栌萞妍照嚸椩宍瓣券吘噝舡縤朥漓倰詴玏愊网芕耶囄濒厔簘准倖蚌娆伄旤噔唆劢勂娰唔煓僑娠撏愌徐繙猩厃纡厸标佁丸廐将佁嚄繤嘆佥卢娸唆猕煁娠咍愊羐縝掏盪梚珊嶨硪梘貎瞩硪柪炦瞩硩袚璦瞩砪梚璦睡嬐扴睅耵徔玵蠼葀抗摙盵婜敜矤佉浧檧熵卵畲栍伢犸米崈胳曚嵁喋兣灜謥媍燙盰猲嵏枣檔耸嵛煁嘘昡毐瀰艬玏愈缡芖楌墆忒摜訧叇灘諘漒喉蓢舸各剡勁訰吒牕炱娠抚掍侐繚浕嬇绱格萞劃罇抌圆伀虄晔唆伥卢娸唅甘慁戤咠晍俰蘞浕嬇缠潊嶧硪梗堾瞩硪枪沦瞩硪墚璦瞩硪梚璦瞩硪梚璥漴幑茅又葆抗揨諠虒教蟤匭此檪剅掝署砑莶毉衡嬄炒蚹艁囌煣桝伣媍燉蛸眲宏栳蚤葀帨膲蛙佁榍传癠潻很绱窖敌囄濒撍怰升灙蛸眙喊埣檤昡塛煀記刑漓倰蘘抖掊罐癒灖嬆廡梡挵喃罩蛜猖刅畒娰吅仢勁縤各琕焑娠厠晍忀蘚畡幈缠炥挵喅庴氾皩硪攨貦瞩硧碊璦瞩硪梚璦瞩硪梚璦瞩硪梚獼艀归猗囉佐擙図曝恤檨臵併牲砑莶母袩扙唗萕漴劊惢蟑伨孍煹欀爮宏埣蚤眶嶪凳囘譁砑腣缙周嬄溡窅襆囃習摩娬呈恚欰紖噉梃誤次塪冲虸猩榍仰昔径愈绰晚敕壆庱梙洳呃罪獔茞刅碃窤椑厝怰縘匃漓俰縘厘掍佐瘖牡幇廰梥潁囄溪獼訣卂縠戈企乀湠娈伀亁繐娄丂俁帰嘄倇佀縠刈包什渐娈儂乀帰娐刃乀縰昐刂什繰樐儃伂幰昌倃偂习娐儂什渐帐億伀湀希吆伀繀娜唆仁乀爤唃企亰爘刃亀渰嘘刃亁丰昐刃侁湀帐切偁乀希唇仁乐帤圄什渠刈各什渠娘各什繐昘各仁繐昘匃俀繀帐儇伀縠嘄伆伀縠嘄吆伀縰嘘吆伀縠昘吆伀繀昘各仁亐縐企佃伀樈伄偄亐娄儉刂幀刌唌偁丐嘘娇什帠刌倁乀渠希倁乀湐娈企亁幀娄伂佁丰嘄倅伀縠娈倃亀帰嘈儃乀渠娐儂亀渰成儂亀繠希倂仁湀娌倂乀縠娌儂什渰娌倄什縰娌刃亀縰娐刂什縰昐儂亀帐嘐儃亀帰娌儃亀縰娌儂伀縰娌億亀縰娌刃亀渐刄刃什渐刐儃亀渐帐刃亀渰帐儃亀縰希儂促亐縐伋刃伀樈夓充亐娜娊刂帰娤圐偁丠樜娉什渠帔倁什繠樐伃仁源戈倃侂幠娈倆偁渰刈刉侀縐刄倂乀帐刈倁乀帠娈企乀渰娈企亁丰嘄伂伀縰嘄企亀帠嘄倃亀渠嘈儂亀渠嘌儂亀渠希伂亀繀娈企乀帠娈倂乀渰嘈倂什渠嘈倃亀渠娈儂亀渰娐倂乀帐刌倂亀帐娌倂亀帰娌倂亀縰娌倂亀渰娌倇儂幠爄娔刁滐帼昐偄习詠愉刁繰縰同侀湰爘圅什繀帔倃企湠爌匄傂庰帔匌偃习娌唆僁丐娔吉伀渠刈儁亀渠帐倂亀湀昌倂亁习娈倂企渰刈倄侁丐刄企乀帐刄倁乀帐刈倁乀帐嘈企乀帠嘀企乀縠刄企乀渠刄企亀渐刄伂亀渐刈倁乀帐嘈企乀帠娈企乀帐嘈企乀帰嘈企乀縠嘈倁亀渠嘈倂亀渠嘈唌倁湀娰愍侁湱买弉侂弡詌堆偄俁娨吉仂庐昐吃仁乀希匄侁湠昘同偁湰樜希侂幰樴娆偀渰昘分亀渠娌倃什湀帐儃仁湠戌儃侁湠娌儆侁渐嘈刄佀渐刄倁亀渠刈倂亀渠娌倂亀渰娈倂亀縰刄倂什縐一一乀帐刄企乀帐刄企乀帐刈丁乀帐嘀企乀帠刄一一帠刄企乀渐刄企亀帐刄伂乀帐刄企乀帐刘圆企乀繀娆侁企牄嘆伅恁娨各叉你縘刑唄纰昐儃企乀娔分侁湀樘圉侁买牀嬆企纱临圄係开縤刃亀渰娈儃亁乀娌儃侁湀娐分侁丰帔圉伀繀戤嘄亀帐刈倂亀渠嘈倂亀渰娈儃仁乀嘌儃企丠娌億伀帐刄企亀渐刄倂亀渐刈倂亀渐嘈倂亀帰嘈倂亀縀一一一一一一一丐一一一帐刄一乀帐刀丁乀帖翖澩硪擲弙卅屘徰溨紕搅买晤嵒冁湐帽刈佁乀寞劥硪梘囑婐彑斓券累墛聀瘘欞枆买昔捡劁湐帑貒硪梚琥剒打苸拰搳宍疓嘼唣囜偀稘吕椆繰昔劃疪梚璦坌捕挔谥倛宍腨囐按囈薓券唆卛聀瘘包滨梚璦瞎慖卥匾坈噎熳氈謘儈耷狈愈俆擲戰唆你蠚璦瞩熓掕杅嶉恉冣竞倽咃灒矤耔傁羖誐將侁畸悖瞩硠煄罁卅汌廢誼硯圂湡艹琘俁湑掄怆佁么桺皩硪暔荕捑懣牁滐萶灏估檌熂媃湠晍蜤倁湐恊澩硪梙彝橞撗蝕庐蠻履抱稨焣熐潐樘掉嬃湠或沥硪梚瑵橡杗葙羄耽彑枥檐崦墥拒到唙猐潠樘厞砪梚璦污枙葖摵瀴幑扙罰缔塊瞕庐專呥抑稨唆疪梚璦瞠晙瑶殪浦嵑扤摱漲及悩獜稔傇坔纄將侟眪璦瞩灑匥匽嶅崅焳曙蜲凁耲寀爋侁潖繬唆佁圪咦瞩硥卵罹桟獕偃盬螕惆红媎层十繡搤舎侁幚咚瞩硪栆厉畧杧萣圅卅痗僡劜碜揉什橦杌呂习撖瞩硪梚掙穫柝框缉啇徨蓃繜眪盘愡娠枣攉廠樚瞩硪梚璡穯楝啚殽剌愓塖謈漮姩哃艠娝盘愡娠咩硪梚璦睯樝敗撡繉愔匊毥圥娋衆謈漑噩哃幜娇滧碚璦瞉愕荕匾坂响煳栈舕偈耷狄將侅擲帨吅佧硚璦瞩畗吖捽玜晌燔挖桗圃聢硕嬡儁羙弈搇侁桚璦瞩硩摦羭畵眛判欝咣椏佲犪煡媄纁璍樥冁繪璦瞩硪梖话艵歪攄猱幐砝芒廀綧樐澰虶畯崅溠梦瞩硪梚珥蝺沟梗獉恒截斕廄耶硞拒扌澨汑倐蘞瞩硪梚璥豾涠晊珹敗揕梗蝜舴寪日櫈朣硟狒橐境癪梚璦屍搕猔谥嘡岎腸围昌囈薓噌嘇呛聐縜吅疪墚璦瞞晘揶掖止嬐艔摱樱匊悩獐爎倆杔牬堇侪梚璦瞩砛哆翑莧槑勄缲獯庈惢貑稽吃俚宄耓倁碚璦瞩硪斗毩衽硞挥坉庩汕儓囚睹慉弲咡蝄噃湺璦瞩硪梘基侄漪春歡晘硠獳廠袩準允皎瞂揋潀璦瞩硪梚琚喇濡袘東橜敪晥绰謽硡揃芐疩潘懂为傥硪梚琹恘打苸猤爺峍蘣艨尥增愡帨唙槉仠樘咠硪梚璦湡晙撦硽琽忑牙羄耗塊瞕檰戊唥拂券唆硪梚璦瞩槛蕇揖癰恓勅傝蝉坌烺徽倡剈框绐攌俪梚璦瞩硞旧萆助涔獕歖睾揌熃沥豗媆怺珹嬧匂碚璦瞩硪晨氞喇硡珅罱殩澗凃苶瞅攏恂沦卡崈仪璦瞩硪梙塆徒犪曦垉灢硣琤圍厩灙爢犲瞉暐烡戈刂亀帐娌儃亀幀娈儃乁丰嘈儂佀縰嘄倄什渠刄儆什渐丐億伀縐成億伀繠希億企湀娌倄侁丰嘈伃俁丰嘀刄俁湀嘐刄俁繀昔刃俁繰昐刃侁繠希儂亁繠师伃伂庐昌分侃亐爘吆伂庰樠各仂庐爘刄亀湰昐儁仁什縠刄侁滠縤合偁滀縜圉侁亰爤圆伀縠樘刃乀繀縰圄企湠証夆倂幰蘸唉偂幠縤圉俁湀帰娄亀帠嘌倁乀縠嘌倁什渠嘌倃亀渠刈儂亀渐刘娐偀縐嘈刃亀帰嘈刃乁丰娈儂伀縰嘈億什縠嘄刋刂幀刈倆伀縐娌億伀湀娌億仁乀娌倄企丰娈伄偄什帄伂俁丰刌儃俁丰娌刃佁乀帐儃企湀希儂仂开縐倁亁繠师倃伂幠娌億企繐帐刄仁湠帐刃亀纑两刂乀湰昐倂仁亐昐儃企亐昐刄企买帐刄伀繰舤娄乀渠帘儁乀帐嘈伂乀帐嘈倂乀帐嘈倁乀帐穌娐偀渰娘圄亀帐刌倁亀渠嘌倃亀渠刌儂亀渐刬愍匂帰娌吉侀渐刈儃乀渠嘈儂什渠嘈億什渠嘄唌傃纐师儆偁渰刄倄什渠嘈倄什縰嘈倃伀縰娈倄偂廰爐倃侂幠娄伂企丠嘈倃伀縰娌儃企丰娌儂仂庐訤刂亁源樐企亁乀娈倂仁湀娌儃仁乀娌儃仂廐爔圁什繐战倂亀帰娄企乀帐刈企乀帠嘄企乀廡樴名企乀渘圃亀渠帐倁乀帐嘄倁乀帐嘌倁乀帑习帉凁湰帨圌伀渠嘔吃乀帐刈倂亀帐刈儂亀帐剀攐偃湰樘堉儁渠嘈切什帐刄倂亀渐刈倃亀渠嘄唌偁滀昌分侂幠嘈倄侁丐刄伃亀渠刄倃什渠嘈倃俁繠爐倃侁源昈倂企湀丄企什縠刈倂什縠嘈倂促亀戔儃仁乐希倂亀縰嘈企乀渐刀一一帐刄一乃潀舘匇企亀昔吃什湀帐倂亀帠嘄企乀帐嘄企乀弱繄圅偁繰縤匉什縰戔吂亀渠娌企乀帐嘈企乀帑扼愊佂幰樴娆偀縰娘匆亀渠嘌儁乀帐刈倁乀帐剀朓傁源樜嬉侂帰娌吅侀渠嘈儃乀帐刄倂乀帐刄刉俁湀昈分侁习嘈億企丐嘈倃什丐刄伂亀帐刄倆偁湐成儃企乀娈倂什縠嘄企亀渐刄企乀一一一億什戔刄企湐成儃亁乀师倂亀渠嘈企乀渀一一丄澑删匄俁纠爔匃什繐戔倂亀湀娈倂亀帠一伀一佒幌堅企纐訰吅仁乀爘匂什縰帐倂亀渠娀丁乀帑源愌侁买穀嬉伀繀昤嘅亀縰娐刂亀渠嘌一乀帐剄朐傁湀樤尌偁帰帐圆伀渰娌刄亀渠嘈儀一帐刄儇什渐丐億什渐希億什幐希倄仁湀娈伃侁丰嘄伄凄习嘄倂什渐刌倂伀渐娈倂什渰嘈倁亀縠嘈企促庰舐伃亁幰娄企乀渠刈企乀縠娈企乀渰嘄企乂廐稔圁什繐戜倂亀湀娄企乀帠刈企乀帠嘄企乀幰縠包伀縰帔匃亀渠娐儂乀帐娈企乀帐刄企乀帐昤吅佁帰娐刄伀縠嘌億亀帐刈儁乀帐刌一一一刌圄什帀希吆伀幠希吆企湐希吆侁幀娈吆佁丰嘈唐千丰刈倆伀渐娈億伀湀娌倄仁丰娈倃伀縰嘈伌參彀爈儃偂幀嘄伂什渐嘈倂什渰嘈倂什縠嘈企内伀渼刄伂亀爌倂亁幠嘄企乀渠嘄企乀渠嘄企乃潀舠匉企亀昔吃什湀成倂亀帰娄企乀帐嘄企乀廁丬包企乀昔包什縠帐匂亀渠娐倂乀帐娄一一帐娤唄亀幀帤圆仁湠帤娇侁湠帤圉俁湀娜嘆侁丰嘜愝凁帐嘈圇什帰娌唆仁乀希刄企乀娈刄企丰嘈尘刅绀希儉儁縰刈倄什渰嘈倄什縰嘈倃什縰嘈休善纑删唄儂绐昌倂侁縰刄伂亀渠嘄伂什縠嘄倁升弰稔圇促亰昤儃仁幐昈倂亁丰刄企乀渠刄企乄澑丬匄俁纰爔匃什繐戔倂亀湀戈倂亀帰丄企乀帰縤吃乁乀縰圄侁湠縸娈偂幠縰圉偁湀瘤圉侁丰橌洐侀渠娰圄亀縰娤唄企乀帘各企乀娘刄企丰嘸栓呃繐娌夎偁丐嘈刄什縠嘌刄什縰娌刄什縰娈愤參估爜唍億买娌儆偁丐刄倃亀渠嘈倃什渠嘈倘圅绀昨圉刃庀縌刄偂亐嘈倂佁丐刄企亀渐刄企吉侀稘刉偃绐爔億伂庀戌儃仁乐嘈倂亁一刄企乀绀縜儁企什訰吆俁滰訸圉傁绠蘤堊偁滀爨堇侀繱幼师亀渰縤吂什繀爤刄企乀爜刄佁乀樘包企丰虴愝凁渰帰希侀帠嘜各什渠娘刃什縰娘刃什縰噐爚充什樜帍刂帰娌吉侀帐刈儃亀渠嘈儃亀渠嘈昫咃幠縤堓刂廀娐刉偂帠嘈倄侀帐刄伂亀渐刄借垆滐昐圌勄亰成分僂繐娌儃侁帠嘈倂伀丐刄企亃什爐伃伃缀舘吉促缐訠堊偃缐爰娊促源縰圇企潁舼唃亀滀爘儃仁亐爘刄企亐爐分侁亐帔匆伀绁艜欏侀繀艐娆乀渠樘刃亀渰昘儃什縰昌儃企丱媘栍匃买橀崔儀縰娤娇乀帐嘐刂亀渠嘐儂亀渰噠稞刂廀爰愐僃帰帐変儀縠嘈匆乀帐刄儂亀帐刈洫善亐昤娗勃习帘唌儁渰娌儆侀渠嘈倄一丐刄伀棚营滨一儃什縀一儃什一一儃一一一儀一一一一什縰娀七什縰一七什縀一七什一一七一一一一一丰娌一一縰娀一什縰一一什縀一一什一一一一一丌儀一一娌一一丰娀一一縰一一一縀一一一一一七一一一儀一一丌一一一娀一一丰一一一一一一一一一一一一一一一一一一一一一一一一丌囇潡帀丌儃什一丌儃一一丌儀一一丌一一一一七什縰一厅潐縀一儃什一一儃一一一儀一一一一一縰娀一什縰一七什縀一七什一一七一一一一一一娌一一丰娀一一縰一一什縀一一什一一一一一一儀一一丌一一一娀一一丰一一一縀一一一一一一一一一一一一一一一一一一一一一一一一娌喅滀一娖厃一一娌儀一一娌一一一娀一一一一儅潠縀一厅潠一丌儃一一丌儀一一丌一一一一一什縰一七什縀一儃什一一儃一一一儀一一一一一丰娀一一縰一一什縀一七什一一七一一一一一一丌一一一娀一一丰一一一縀一一什一一一一一一一一一一一一一一一一一一一一一一一一丰娌喃一丰娖厀一一娌一一丰娀一一丰一一一一丌儅潠一丌厅渀一丌儀一一娌一一一娀一一一一一什縀一七什一一儃一一丌儀一一丌一一一一一一縰一一什縀一七什一一儃一一一儀一一一一一一娀一一丰一一一縀一一什一一七一一一一一一一一一一一一一一一一一一一一一一一一一縰娌厀一縰娖一一丰挀一一丰一一一縀一一一一夌儅渀一娌厀一一娖一一一娀一一丰一一一一一一什一一儃一一一厀一一丌一一一娀一一一一一一縀一一什一一七一一一儀一一丌一一一一一一丰一一一縀一一什一一七一一一儀一一一一一一一一一一一一一一一一一一一一一一一一一縰娆一什縰娀一一稔一一一一一一一一一一一一夌一一一娌一一丰娀一一一一一一一一一一一一一一一一一一一三一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一一)~";
+const int NG = 3;
+const GameT GAMES[] = {{3, 3, 7, 6, LV0, ND0, D0}, {3, 4, 7, 6, LV1, ND1, D1}, {4, 4, 6, 14, LV2, ND2, D2}};
+}  // namespace pfn_t
+// ---- cpp/pe7c.hpp
+// pe7c.hpp - 5..7-card Texas hold'em hand evaluator, CodinGame-ready (the one to ship).
+//
+// Usage: pe::init() once (builds every table: ~80 ms with CodinGame's flags here, see README.md),
+// then build hands incrementally from pe::E:  H h = add(add(E, c0), c1); ... ; u16 v = ev(h);
+// Card c = 4*rank + suit, rank 0..12 = 2..A, suit 0..3.  ev() is defined for 5, 6 or 7 distinct
+// cards and returns 1..7462, higher is better: the hand's rank among the standard 7,462
+// five-card equivalence classes (1..1277 high card, 1278..4137 pair, 4138..4995 two pair,
+// 4996..5853 trips, 5854..5863 straight, 5864..7140 flush, 7141..7296 full house,
+// 7297..7452 quads, 7453..7462 straight flush).  add(H, H) combines two hands that were each
+// built from E (e.g. board + hole cards).  Tables are plain globals: include from one TU only.
+//
+// CodinGame form: no std containers and no payload (CG compiles at -O0 and the source's
+// `#pragma GCC optimize("O3")` only optimizes function bodies, so hot helpers are
+// always_inline).  No preprocessor macros either: crossfish's tools/cg_minify.py renames
+// macro names inconsistently, which is why the earlier `#define AI` / PE_SH version failed
+// to compile after minification.  `#pragma once` must stay on line 1: the minifier strips
+// it only there.  pe7.hpp is the readable std::vector reference version of the same method.
+//
+// Attribution: the method follows OMPEval by Timo A. (https://github.com/zekyll/OMPEval,
+// ISC license; notice reproduced in cpp/THIRD_PARTY.md).  Taken from OMPEval: the 13
+// additive rank keys RK[] (OMPEval's RANKS constants, chosen so every multiset of 0..7 ranks
+// has a unique sum), the hand layout (rank-key sum plus 4-bit suit counters that start at 3,
+// so `& 0x8888` flags a flush, plus 16-bit per-suit rank masks), the 8192-entry flush table,
+// and the perfect hash from rank key to class by row displacement (rows placed largest first
+// at the lowest offset that does not conflict; OMPEval's PERF_HASH_ROW_OFFSETS scheme).
+// Differences: rows are 2^8 keys wide instead of OMPEval's 2^12 so the hash can be rebuilt at
+// start-up (OMPEval ships a precomputed 102 KB offset table instead), and ev() returns the
+// dense 1..7462 class instead of OMPEval's category*4096 + rank.
+#include <cstdint>
+#include <cstring>
+namespace pe {
+typedef uint64_t u64; typedef uint32_t u32; typedef uint16_t u16;
+const u32 RK[13] = {0x2000, 0x8001, 0x11000, 0x3a000, 0x91000, 0x176005, 0x366000,
+                    0x41a013, 0x47802e, 0x479068, 0x48c0e4, 0x48f211, 0x494493};
+enum { SH = 8, NR = ((4 * 0x494493 + 3 * 0x48f211) >> SH) + 1, LN = 1 << 18, NM = 73775 };
+u16 FL[8192], LK[LN]; u32 OFF[NR];
+struct H { u64 k, m; };
+H C[52]; const H E = {0x3333ull << 32, 0};
+__attribute__((always_inline)) inline H add(H a, int c) { return {a.k + C[c].k, a.m | C[c].m}; }
+__attribute__((always_inline)) inline H add(H a, H b) { return {a.k + b.k - E.k, a.m | b.m}; }
+__attribute__((always_inline)) inline u16 ev(const H& h) {
+  u64 f = h.k >> 32 & 0x8888;
+  if (f) return FL[h.m >> (4 * __builtin_ctzll(f) & ~15) & 0x1fff];
+  u32 k = h.k; return LK[k + OFF[k >> SH]];
+}
+int st(u32 m) { m = m << 1 | (m >> 12 & 1); for (int r = 13; r > 3; r--) if ((m >> (r - 4) & 31) == 31) return r - 1; return -1; }
+u32 tp(u32 m, int n) { u32 v = 0; for (int r = 12; r >= 0 && n; r--) if (m >> r & 1) v = v << 4 | r, n--; while (n--) v <<= 4; return v; }
+int hi(u32 m) { return 31 - __builtin_clz(m); }
+u32 slowc(int* c) {                                  // non-flush code from rank counts
+  u32 a = 0, q = 0, t = 0, p = 0;
+  for (int r = 0; r < 13; r++) { u32 b = 1u << r; if (c[r]) a |= b; if (c[r] == 4) q |= b; if (c[r] == 3) t |= b; if (c[r] == 2) p |= b; }
+  if (q) { int r = hi(q); return 7 << 20 | r << 16 | tp(a & ~(1u << r), 1) << 12; }
+  if (t && (t & (t - 1) || p)) { int r = hi(t); return 6 << 20 | r << 16 | hi(t & ~(1u << r) | p) << 12; }
+  int s = st(a); if (s >= 0) return 4 << 20 | s << 16;
+  if (t) { int r = hi(t); return 3 << 20 | r << 16 | tp(a & ~(1u << r), 2) << 8; }
+  if (p & (p - 1)) { int x = hi(p), y = hi(p & ~(1u << x)); return 2 << 20 | x << 16 | y << 12 | tp(a & ~(1u << x) & ~(1u << y), 1) << 8; }
+  if (p) { int x = hi(p); return 1 << 20 | x << 16 | tp(a & ~(1u << x), 3) << 4; }
+  return tp(a, 5);
+}
+u32 slowf(u32 m) { int s = st(m); return s >= 0 ? 8 << 20 | s << 16 : 5 << 20 | tp(m, 5); }
+u32 KY[NM], CD[NM], nk, RS[NR + 1], RE[NM], NX[LN + 1]; int cn[13]; u64 BM[(9 << 20) / 64 + 1]; u32 PR[(9 << 20) / 64 + 1];
+void rec(int r, int n, u32 key) {
+  if (r == 13) { if (n > 4) KY[nk] = key, CD[nk++] = slowc(cn); return; }
+  for (int k = 0; k < 5 && n + k < 8; k++) cn[r] = k, rec(r + 1, n + k, key + k * RK[r]);
+  cn[r] = 0;
+}
+__attribute__((always_inline)) inline u16 cls(u32 c) { return PR[c >> 6] + __builtin_popcountll(BM[c >> 6] & ((1ull << (c & 63)) - 1)) + 1; }
+u32 fnd(u32 i) { while (NX[i] != i) i = NX[i] = NX[NX[i]]; return i; }
+void init() {
+  for (int c = 0; c < 52; c++) C[c] = {RK[c >> 2] + (1ull << (32 + 4 * (c & 3))), 1ull << (16 * (c & 3) + (c >> 2))};
+  rec(0, 0, 0);
+  for (u32 i = 0; i < nk; i++) BM[CD[i] >> 6] |= 1ull << (CD[i] & 63);           // dense ranks via bitmap
+  for (u32 m = 0; m < 8192; m++) if (__builtin_popcount(m) > 4) { u32 c = slowf(m); BM[c >> 6] |= 1ull << (c & 63); }
+  for (u32 i = 1; i < sizeof BM / 8; i++) PR[i] = PR[i - 1] + __builtin_popcountll(BM[i - 1]);
+  for (u32 m = 0; m < 8192; m++) FL[m] = __builtin_popcount(m) > 4 ? cls(slowf(m)) : 0;
+  for (u32 i = 0; i < nk; i++) RS[(KY[i] >> SH) + 1]++;                            // bucket keys by row
+  for (u32 i = 0; i < NR; i++) RS[i + 1] += RS[i];
+  static u32 fill[NR]; memcpy(fill, RS, sizeof fill);
+  for (u32 i = 0; i < nk; i++) RE[fill[KY[i] >> SH]++] = i;
+  for (u32 i = 0; i <= LN; i++) NX[i] = i;
+  for (int sz = 64; sz > 0; sz--) for (u32 r = 0; r < NR; r++) if (RS[r + 1] - RS[r] == (u32)sz) {  // largest rows first
+    u32 m = (1 << SH) - 1, e0 = KY[RE[RS[r]]] & m, o;
+    for (u32 f = fnd(e0);; f = fnd(f + 1)) {
+      o = f - e0; u32 j = RS[r];
+      for (; j < RS[r + 1]; j++) { u32 i = RE[j]; u16 v = LK[(KY[i] & m) + o]; if (v && v != cls(CD[i])) break; }
+      if (j == RS[r + 1]) break;
+    }
+    for (u32 j = RS[r]; j < RS[r + 1]; j++) { u32 i = RE[j], s = (KY[i] & m) + o; LK[s] = cls(CD[i]); NX[s] = s + 1; }
+    OFF[r] = o - (r << SH);
+  }
+}
+}  // namespace pe
+// ---- engine/tracker.hpp
+// tracker.hpp - the bot's state tracker: a pk::Board driven by the stdin lines.
+//
+// Stdin is one snapshot at our turn, so the tracker replays everything that happened since the
+// last turn through the same rules the referee uses: it starts each hand (positions, blinds), applies
+// every action line (an ALL-IN line carries no amount: the Board knows the stack), handles NONE
+// rounds, settles finished hands from their showdown line (all hole cards are revealed), and then
+// checks itself against the snapshot: round, hand, stacks, chips in pot, board, and the offered
+// actions, which pins down the minimum raise and the raise cap.  engine/check.py runs a Tracker per
+// seat alongside the engine on every fuzz and replay decision.
+//
+// After apply(): players[], board, pot, blinds, positions, next_player (== me) and
+// possible_actions() describe the current decision; hole() gives our cards.
+#include <sstream>
+
+// ---- engine/poker_engine.hpp
+// poker_engine.hpp - C++ port of the CodinGame "Poker" referee (wala-fr/CodingamePoker @ ac30d97),
+// method for method the same as sim/poker_sim.py, which is the validated Python port.
+//
+// Board holds the rules (blinds, betting, action replacement, side pots, elimination ranks) with no
+// deck and no RNG, so the bot's tracker (tracker.hpp) can drive it from stdin.  Engine adds the deck,
+// the inputs and the Referee.gameTurn loop.
+//
+// Game loop: Engine eng(n, seed); eng.run(agents) with one Agent per seat.  Agent::act receives the
+// Obs the real bot would get on stdin (Obs::to_stdin renders the exact text) and returns the bot's
+// raw output line, or false for a timeout.  Rounds, the 600-decision cap with refund, NONE rounds,
+// blind posting (every non-BB player posts the SB), action replacement, side pots, the odd chip,
+// elimination ranks and the SHA1PRNG deck are all reproduced; engine/check.py proves it against
+// poker_sim.py (random-action fuzz) and against the 381 recorded games.
+//
+// Cards are ints 0..51 = 4*rank + suit, rank 0..12 = 2..A, suit 0..3 = C,D,H,S (the referee's
+// CardUtils order and pe7c's encoding).
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+// ---- engine/sha1prng.hpp
+// sha1prng.hpp - bit-exact port of Java's SecureRandom("SHA1PRNG") (sun.security.provider.SecureRandom),
+// java.util.Random.nextInt(bound) and Collections.shuffle, as used by the CodinGame SDK
+// (MultiplayerGameManager.getRandom()) and the Poker referee's Deck.  Mirrors sim/poker_sim.py.
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+namespace pk {
+
+struct Sha1 {
+  static void digest(const uint8_t* msg, size_t len, uint8_t out[20]) {
+    uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    std::vector<uint8_t> m(msg, msg + len);
+    m.push_back(0x80);
+    while (m.size() % 64 != 56) m.push_back(0);
+    uint64_t bits = (uint64_t)len * 8;
+    for (int i = 7; i >= 0; i--) m.push_back((uint8_t)(bits >> (8 * i)));
+    for (size_t off = 0; off < m.size(); off += 64) {
+      uint32_t w[80];
+      for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)m[off + 4 * i] << 24 | (uint32_t)m[off + 4 * i + 1] << 16 |
+               (uint32_t)m[off + 4 * i + 2] << 8 | m[off + 4 * i + 3];
+      for (int i = 16; i < 80; i++) {
+        uint32_t x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
+        w[i] = x << 1 | x >> 31;
+      }
+      uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+      for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20) f = (b & c) | (~b & d), k = 0x5A827999u;
+        else if (i < 40) f = b ^ c ^ d, k = 0x6ED9EBA1u;
+        else if (i < 60) f = (b & c) | (b & d) | (c & d), k = 0x8F1BBCDCu;
+        else f = b ^ c ^ d, k = 0xCA62C1D6u;
+        uint32_t t = (a << 5 | a >> 27) + f + e + k + w[i];
+        e = d; d = c; c = b << 30 | b >> 2; b = a; a = t;
+      }
+      h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    for (int i = 0; i < 5; i++)
+      out[4 * i] = h[i] >> 24, out[4 * i + 1] = h[i] >> 16, out[4 * i + 2] = h[i] >> 8, out[4 * i + 3] = h[i];
+  }
+};
+
+class Sha1Prng {
+ public:
+  explicit Sha1Prng(int64_t seed) {
+    uint8_t sb[8];                                   // SecureRandom.longToByteArray: little-endian
+    for (int i = 0; i < 8; i++) sb[i] = (uint8_t)((uint64_t)seed >> (8 * i));
+    Sha1::digest(sb, 8, state_);
+  }
+  // java.util.Random.next(bits) as implemented by SHA1PRNG.engineNextBytes
+  uint32_t next(int bits) {
+    int nb = (bits + 7) / 8;
+    uint64_t v = 0;
+    for (int i = 0; i < nb; i++) v = v << 8 | next_byte();
+    return (uint32_t)(v >> (nb * 8 - bits));
+  }
+  int next_int(int bound) {                          // java.util.Random.nextInt(bound)
+    uint32_t r = next(31);
+    int m = bound - 1;
+    if ((bound & m) == 0) return (int)(((int64_t)bound * (int64_t)r) >> 31);
+    int32_t u = (int32_t)r;
+    for (;;) {
+      int32_t rr = u % bound;
+      if ((int64_t)u - rr + m < (1LL << 31)) return rr;
+      u = (int32_t)next(31);
+    }
+  }
+  template <class T>
+  void shuffle(std::vector<T>& v) {                   // Collections.shuffle, RandomAccess branch
+    for (int i = (int)v.size(); i > 1; i--) {
+      int j = next_int(i);
+      std::swap(v[i - 1], v[j]);
+    }
+  }
+
+ private:
+  uint8_t state_[20];
+  uint8_t buf_[20];
+  int buf_pos_ = 20;
+  uint8_t next_byte() {
+    if (buf_pos_ == 20) next_block(), buf_pos_ = 0;
+    return buf_[buf_pos_++];
+  }
+  void next_block() {
+    Sha1::digest(state_, 20, buf_);
+    // updateState: Java adds *signed* bytes; the carry is v >> 8 and can be -1
+    int last = 1;
+    bool zf = false;
+    for (int i = 0; i < 20; i++) {
+      int sv = (int8_t)state_[i], ov = (int8_t)buf_[i];
+      int v = sv + ov + last;
+      uint8_t t = (uint8_t)(v & 0xFF);
+      zf |= state_[i] != t;
+      state_[i] = t;
+      last = v >> 8;
+    }
+    if (!zf) state_[0]++;
+  }
+};
+
+}  // namespace pk
+
+namespace pk {
+
+// ----------------------------------------------------------------------------- parameters
+constexpr int SMALL_BLIND = 5, BIG_BLIND = 10;    // model/variable/Parameter.java
+constexpr int TOTAL_BUY_IN = 4800;
+constexpr int HAND_NB_BY_LEVEL = 10, LEVEL_MULT = 2;
+constexpr int RAISE_CAP = 10;
+constexpr int MAX_TURN = 600;                      // game/RefereeParameter.java (decisions per game)
+constexpr int MAX_REFEREE_TURN = 10000;            // frames
+constexpr const char* RANKS = "23456789TJQKA";
+constexpr const char* SUITS = "CDHS";
+
+inline std::string card_str(int c) { return std::string{RANKS[c >> 2], SUITS[c & 3]}; }
+inline int card_from(const char* s) {               // "AS" -> 51; -1 if not a card
+  const char* r = std::strchr(RANKS, s[0]);
+  const char* u = std::strchr(SUITS, s[1]);
+  if (!s[0] || !s[1] || !r || !u) return -1;
+  return (int)(r - RANKS) * 4 + (int)(u - SUITS);
+}
+
+// ----------------------------------------------------------------------------- hand evaluation
+// Same ordering as poker_sim.eval5 (standard rankings, wheel = 5-high straight): category<<20 then
+// the tuple's rank fields in 4-bit nibbles, so two values compare like the Python tuples.
+inline uint32_t eval5(const int* c) {
+  int rs[5], cnt[15] = {0};
+  bool flush = true;
+  for (int i = 0; i < 5; i++) rs[i] = (c[i] >> 2) + 2, cnt[rs[i]]++, flush &= (c[i] & 3) == (c[0] & 3);
+  std::sort(rs, rs + 5, [](int a, int b) { return a > b; });
+  int uniq = 0;
+  for (int r = 14; r >= 2; r--) uniq += cnt[r] > 0;
+  int straight_hi = 0;
+  if (uniq == 5) {
+    if (rs[0] - rs[4] == 4) straight_hi = rs[0];
+    else if (rs[0] == 14 && rs[1] == 5 && rs[4] == 2) straight_hi = 5;
+  }
+  // counts sorted by (count, rank) descending
+  int shape[5], ordered[5], k = 0;
+  for (int n = 4; n >= 1; n--)
+    for (int r = 14; r >= 2; r--)
+      if (cnt[r] == n) shape[k] = n, ordered[k] = r, k++;
+  auto pack = [](int cat, const int* v, int n) {
+    uint32_t x = (uint32_t)cat << 20;
+    for (int i = 0; i < n; i++) x |= (uint32_t)v[i] << (16 - 4 * i);
+    return x;
+  };
+  if (straight_hi && flush) return pack(8, &straight_hi, 1);
+  if (k == 2 && shape[0] == 4) return pack(7, ordered, 2);
+  if (k == 2 && shape[0] == 3) return pack(6, ordered, 2);
+  if (flush) return pack(5, rs, 5);
+  if (straight_hi) return pack(4, &straight_hi, 1);
+  if (k == 3 && shape[0] == 3) return pack(3, ordered, 3);
+  if (k == 3 && shape[0] == 2) return pack(2, ordered, 3);
+  if (k == 4) return pack(1, ordered, 4);
+  return pack(0, rs, 5);
+}
+
+inline uint32_t best7(const int* hole, const std::vector<int>& board) {  // best of C(7,5)
+  int all[7] = {hole[0], hole[1], board[0], board[1], board[2], board[3], board[4]};
+  uint32_t best = 0;
+  int five[5];
+  for (int a = 0; a < 7; a++)
+    for (int b = a + 1; b < 7; b++) {
+      int k = 0;
+      for (int i = 0; i < 7; i++)
+        if (i != a && i != b) five[k++] = all[i];
+      best = std::max(best, eval5(five));
+    }
+  return best;
+}
+
+// ----------------------------------------------------------------------------- model
+struct Player {
+  int id = 0, stack = 0;
+  int total = 0;            // totalBetAmount (whole hand) == "chipInPot" on stdin
+  int rnd = 0;              // roundBetAmount (current street)
+  bool folded = false, allin = false, spoken = false, eliminated = false, timeout = false;
+  int elim_rank = -1, score = 0;
+  int hand[2] = {-1, -1};
+  int n_hand = 0;
+  bool can_act() const { return !folded && !allin; }
+};
+
+struct Obs {
+  // init (meaningful on the first call for this player)
+  int small_blind = 0, big_blind = 0, hand_nb_by_level = 0, level_mult = 0, buy_in = 0, first_bb_id = 0, player_nb = 0, player_id = 0;
+  // per turn
+  int round = 0, hand_nb = 0;
+  std::vector<int> stacks, chip_in_pot;
+  std::string board, cards;
+  std::vector<std::string> actions;    // "round handNb playerId ACTION BOARD"
+  std::vector<std::string> showdowns;  // "handNb BOARD CARDS"
+  std::vector<std::string> possible;
+
+  // The exact stdin text the referee sends for this decision (InputSender.sendInputs).
+  std::string to_stdin(bool first) const {
+    std::string s;
+    auto line = [&](const std::string& x) { s += x; s += '\n'; };
+    auto num = [&](int x) { line(std::to_string(x)); };
+    if (first) {
+      num(small_blind); num(big_blind); num(hand_nb_by_level); num(level_mult);
+      num(buy_in); num(first_bb_id); num(player_nb); num(player_id);
+    }
+    num(round); num(hand_nb);
+    for (size_t i = 0; i < stacks.size(); i++) line(std::to_string(stacks[i]) + " " + std::to_string(chip_in_pot[i]));
+    line(board); line(cards);
+    num((int)actions.size()); for (auto& a : actions) line(a);
+    num((int)showdowns.size()); for (auto& a : showdowns) line(a);
+    num((int)possible.size()); for (auto& a : possible) line(a);
+    return s;
+  }
+};
+
+struct Agent {
+  virtual ~Agent() {}
+  // Fill `out` with the bot's raw output line (may include ";message"); return false for a timeout.
+  virtual bool act(const Obs& obs, std::string& out) = 0;
+};
+
+enum ActType { A_FOLD, A_CHECK, A_ALL_IN, A_BET, A_CALL, A_TIMEOUT };
+inline const char* act_name(ActType t) {
+  static const char* n[] = {"FOLD", "CHECK", "ALL-IN", "BET", "CALL", "TIMEOUT"};
+  return n[t];
+}
+
+struct RoundInfo { int turn, hand, pid; std::string shown, board; };
+struct LogEntry { int turn, hand, pid; std::string shown; };
+
+// The rules of one table: everything in the referee's Board/ActionUtils/WinningCalculator that does
+// not touch the deck.  Card identities come from draw(), which a Board alone does not know (-1).
+class Board {
+ public:
+  int n = 0;
+  std::vector<Player> players;
+  int sb = SMALL_BLIND, bb = BIG_BLIND, level = 1, hand_nb = 0, bb_id = 0, sb_id = -1, dealer_id = -1;
+  bool over = true, calc_winnings = false, deal_card = false, calc_next = false, game_over = false, cancelled = false;
+  int turn = 0;
+  int pot = 0;
+  std::vector<int> board;                            // card ids; -1 = dealt but not yet known (tracker)
+  int last_round_raise = 0, last_total_round_bet = 0, last_raiser = -1, raise_nb = 0, last_player = -1, next_player = -1;
+
+  Board() {}
+  Board(int n_, int first_bb) : n(n_) {
+    if (n < 2 || n > 4) throw std::invalid_argument("n must be 2..4");
+    players.resize(n);
+    for (int i = 0; i < n; i++) players[i].id = i, players[i].stack = TOTAL_BUY_IN / n;
+    bb_id = first_bb;
+  }
+  virtual ~Board() {}
+  virtual int draw() { return -1; }
+
+  // ------------------------------------------------------------------ Board helpers
+  void reset_round() {
+    for (auto& p : players) p.rnd = 0, p.spoken = false;
+    last_round_raise = 0; last_total_round_bet = 0; last_raiser = -1; raise_nb = 0;
+  }
+  void reset_hand() {
+    board.clear();
+    for (auto& p : players) {
+      p.n_hand = 0; p.hand[0] = p.hand[1] = -1;
+      p.eliminated = p.stack == 0;
+      p.allin = false;
+      p.folded = p.stack == 0;
+      p.total = 0;
+    }
+    over = false; pot = 0;
+    reset_round();
+    hand_nb++;
+    if (hand_nb % HAND_NB_BY_LEVEL == 0) level++, sb *= LEVEL_MULT, bb *= LEVEL_MULT;   // Board.increaseLevel
+    init_positions();
+  }
+  void init_positions() {
+    if (hand_nb > 1) {                               // calculateNextBigBlindId
+      do bb_id = (bb_id + 1) % n; while (players[bb_id].stack == 0);
+    }
+    sb_id = dealer_id = -1;
+    int nb = 0;
+    for (int i = 0; i < n; i++) {
+      int idx = ((bb_id - 1 - i) % n + n) % n;
+      if (!players[idx].folded) {
+        nb++;
+        if (sb_id == -1) sb_id = idx;
+        else if (dealer_id == -1) dealer_id = idx;
+      }
+    }
+    if (nb == 2) dealer_id = sb_id;
+    last_player = -1; next_player = bb_id;
+    last_total_round_bet = bb; last_round_raise = sb; last_raiser = -1; raise_nb = 1;
+  }
+  void init_blind() {
+    // every non-folded player posts at least the SMALL blind (Board.initBlind)
+    for (auto& p : players)
+      if (!p.folded) {
+        int bet = p.id == bb_id ? bb : sb;
+        if (p.stack < (p.id == sb_id ? sb : bb)) bet = p.stack;
+        bet_chips(p, bet);
+      }
+  }
+  bool is_first_bet() const { return last_raiser == -1; }
+  void bet_chips(Player& p, int value) {
+    value = std::min(value, p.stack);
+    p.stack -= value; p.total += value; p.rnd += value;
+    if (p.stack == 0) p.allin = true;
+    int raise = p.rnd - last_total_round_bet;
+    if ((is_first_bet() && raise >= bb) || (!is_first_bet() && raise >= last_round_raise)) {
+      last_round_raise = raise; last_raiser = p.id; last_total_round_bet += raise; raise_nb++;
+    }
+    pot += value;
+  }
+  void deal_first() {
+    for (int k = 0; k < 2; k++)
+      for (int i = 0; i < n; i++) {
+        Player& p = players[(dealer_id + 1 + i) % n];
+        if (!p.folded) p.hand[p.n_hand++] = draw();
+      }
+  }
+  int max_total() const { int m = 0; for (auto& p : players) m = std::max(m, p.total); return m; }
+  bool no_more_can_act() const {
+    int k = 0;
+    for (auto& p : players) k += p.can_act();
+    if (k <= 1) {
+      int mx = max_total();
+      for (auto& p : players) if (p.can_act() && p.total < mx) return false;
+      return true;
+    }
+    return false;
+  }
+  void calculate_next_player() {
+    int idx = next_player + 1;
+    next_player = -1;
+    if (!no_more_can_act())
+      for (int i = 0; i < n; i++, idx++) {
+        const Player& p = players[idx % n];
+        if (p.can_act()) { next_player = p.id; break; }
+      }
+  }
+  int not_folded() const { int k = 0; for (auto& p : players) k += !p.folded; return k; }
+  bool is_turn_over() const {
+    int mx = max_total();
+    for (auto& p : players)
+      if (p.can_act()) {
+        if (!p.spoken) {
+          bool other = false;
+          for (auto& q : players) other |= q.can_act() && q.id != p.id;
+          if (!other) { if (p.total < mx) return false; }
+          else return false;
+        }
+        if (p.total < mx) return false;
+      }
+    return true;
+  }
+  void end_turn() {
+    if (next_player != -1) last_player = next_player, players[next_player].spoken = true;
+    deal_card = false;
+    if (not_folded() == 1) calc_winnings = true;
+    else if (is_turn_over()) {
+      if (no_more_can_act()) {
+        while (board.size() < 5) deal_board_cards();
+        calc_winnings = true;
+      } else if (board.size() == 5) calc_winnings = true;
+      else { deal_card = true; last_player = -1; next_player = dealer_id; }
+    }
+  }
+  void deal_board_cards() {
+    draw();                                           // burn
+    int k = board.empty() ? 3 : 1;
+    for (int i = 0; i < k; i++) board.push_back(draw());
+    reset_round();
+  }
+  bool deal() {
+    bool ret = deal_card;
+    if (ret) deal_board_cards();
+    deal_card = false;
+    return ret;
+  }
+  bool preflop() const { return board.empty(); }
+  int call_amount(const Player& p) const {
+    if (preflop()) return std::max(bb, max_total()) - p.total;
+    return max_total() - p.total;
+  }
+  bool check_possible() const { return call_amount(players[next_player]) == 0; }
+  bool raise_cap() const { return raise_nb > RAISE_CAP; }
+
+  // ------------------------------------------------------------------ ActionUtils
+  std::vector<std::string> possible_actions() const {
+    int pid = next_player;
+    const Player& p = players[pid];
+    int call = call_amount(p);
+    bool cap = raise_cap();
+    std::vector<std::string> out;
+    bool allin = false;
+    if (call > 0) {
+      if (call < p.stack) out.push_back("CALL");
+      else if (!cap) out.push_back("ALL-IN"), allin = true;
+    }
+    if (last_raiser != pid && !cap) {
+      if (!allin) out.push_back("ALL-IN");
+      int min_raise = is_first_bet() ? bb : last_round_raise;
+      int min_amount = min_raise + last_total_round_bet - p.rnd;
+      if (min_amount < p.stack) out.push_back("BET_" + std::to_string(min_amount));
+    }
+    if (check_possible()) out.push_back("CHECK");
+    out.push_back("FOLD");
+    return out;
+  }
+
+  // Action.create / ActionInfo.create on the first ';'-part of the output, upper-cased and trimmed.
+  // Returns {type, amount, error}; an unparseable string is FOLD with error = true.
+  struct Parsed { ActType t; int amount; bool err; };
+  static Parsed parse(std::string s) {
+    // Referee: outputs[0].toUpperCase().trim()
+    for (auto& ch : s) ch = (char)toupper((unsigned char)ch);
+    size_t a = 0, b = s.size();
+    while (a < b && (unsigned char)s[a] <= ' ') a++;
+    while (b > a && (unsigned char)s[b - 1] <= ' ') b--;
+    s = s.substr(a, b - a);
+    if (s.rfind("BET_", 0) == 0) {                   // Action.create: replaceAll("BET_", "BET ")
+      std::string t;
+      for (size_t i = 0; i < s.size();) {
+        if (s.compare(i, 4, "BET_") == 0) t += "BET ", i += 4; else t += s[i++];
+      }
+      s = t;
+    }
+    std::vector<std::string> tok;                    // split(" ", -1): keeps empty tokens
+    size_t start = 0;
+    for (;;) {
+      size_t sp = s.find(' ', start);
+      tok.push_back(s.substr(start, sp == std::string::npos ? std::string::npos : sp - start));
+      if (sp == std::string::npos) break;
+      start = sp + 1;
+    }
+    ActType t;
+    const std::string& h = tok[0];
+    if (h == "FOLD") t = A_FOLD; else if (h == "CHECK") t = A_CHECK;
+    else if (h == "ALL-IN" || h == "ALL_IN") t = A_ALL_IN; else if (h == "BET") t = A_BET;
+    else if (h == "CALL") t = A_CALL; else if (h == "TIMEOUT") t = A_TIMEOUT;
+    else return {A_FOLD, 0, true};
+    if (tok.size() > 2) return {A_FOLD, 0, true};
+    if (t == A_BET) {
+      if (tok.size() != 2) return {A_FOLD, 0, true};
+      int64_t v = 0; bool neg = false; size_t i = 0;
+      const std::string& d = tok[1];                 // Integer.parseInt: optional sign, ASCII digits
+      if (!d.empty() && (d[0] == '-' || d[0] == '+')) neg = d[0] == '-', i = 1;
+      if (i >= d.size()) return {A_FOLD, 0, true};
+      for (; i < d.size(); i++) {
+        if (d[i] < '0' || d[i] > '9') return {A_FOLD, 0, true};
+        v = v * 10 + (d[i] - '0');
+        if (v > (1LL << 31)) return {A_FOLD, 0, true};
+      }
+      if (neg) v = -v;
+      if (v < -(1LL << 31) || v >= (1LL << 31)) return {A_FOLD, 0, true};
+      return {A_BET, (int)v, false};
+    }
+    if (tok.size() > 1) return {A_FOLD, 0, true};
+    return {t, 0, false};
+  }
+
+  // ActionUtils.calculatePossibleBet: replacement of illegal actions
+  std::pair<ActType, int> replace(ActType t, int amount) const {
+    if (t == A_FOLD || t == A_TIMEOUT) return {t, amount};
+    int pid = next_player;
+    const Player& p = players[pid];
+    int call = call_amount(p);
+    bool cap = raise_cap();
+    std::pair<ActType, int> call_action = call < p.stack ? std::make_pair(A_CALL, 0) : std::make_pair(A_ALL_IN, 0);
+    if (t == A_CALL) {
+      if (check_possible()) return {A_CHECK, 0};
+      if (call >= p.stack) return {A_ALL_IN, 0};
+      return {A_CALL, 0};
+    }
+    if (t == A_ALL_IN) {
+      std::pair<ActType, int> nw = {A_ALL_IN, 0};
+      if (last_raiser == pid && call < p.stack) nw = {A_CALL, 0};
+      if (cap) nw = call_action;
+      return nw;
+    }
+    if (t == A_BET) {
+      if (amount <= 0) return {A_FOLD, 0};
+      if (amount <= call) return call_action;
+      if (last_raiser == pid || cap) return call_action;
+      if (amount >= p.stack) return {A_ALL_IN, 0};
+      int raise = p.rnd + amount - last_total_round_bet;
+      int min_raise = is_first_bet() ? bb : last_round_raise;
+      if (raise < min_raise) {
+        int nb = min_raise + last_total_round_bet - p.rnd;
+        return nb >= p.stack ? std::make_pair(A_ALL_IN, 0) : std::make_pair(A_BET, nb);
+      }
+      return {A_BET, amount};
+    }
+    // CHECK
+    if (!check_possible()) return {A_FOLD, 0};
+    return {A_CHECK, 0};
+  }
+
+  void do_action(ActType t, int amount) {
+    Player& p = players[next_player];
+    switch (t) {
+      case A_FOLD: p.folded = true; break;
+      case A_CHECK: break;
+      case A_ALL_IN: bet_chips(p, p.stack); break;
+      case A_CALL: bet_chips(p, call_amount(p)); break;
+      case A_BET: bet_chips(p, amount); break;
+      case A_TIMEOUT: p.stack = 0; p.timeout = true; p.folded = true; break;
+    }
+  }
+
+  // ------------------------------------------------------------------ winnings
+  bool calculate_player_winnings() {
+    if (!calc_winnings) return false;
+    calc_winnings = false;
+    deal();
+    std::vector<int> bets(n), win(n, 0);
+    std::vector<char> folded(n);
+    std::vector<int64_t> value(n, -1);
+    for (int i = 0; i < n; i++) bets[i] = players[i].total, folded[i] = players[i].folded;
+    if (not_folded() > 1)
+      for (auto& p : players)
+        if (!p.folded && board.size() == 5) value[p.id] = best7(p.hand, board);
+    for (;;) {
+      int mn = 1 << 30, mx = 0;
+      int64_t best = -2;
+      for (int i = 0; i < n; i++)
+        if (!folded[i]) mn = std::min(mn, bets[i]), mx = std::max(mx, bets[i]), best = std::max(best, value[i]);
+      std::vector<int> winners;
+      for (int i = 0; i < n; i++) if (!folded[i] && value[i] == best) winners.push_back(i);
+      int tot = 0;
+      for (int i = 0; i < n; i++) {
+        int t = std::min(bets[i], mn);
+        tot += t; bets[i] -= t;
+        if (bets[i] == 0) folded[i] = true;
+      }
+      if (winners.empty()) {                             // impossible in the referee; a desynced Tracker
+        for (int i = 0; i < n; i++) win[i] += std::min(players[i].total, mn);   //   gets its chips back
+        break;
+      }
+      int share = tot / (int)winners.size(), rem = tot % (int)winners.size();
+      for (int w : winners) win[w] += share;
+      int j = dealer_id + 1;                           // odd chips: first winner after the dealer
+      while (std::find(winners.begin(), winners.end(), j % n) == winners.end()) j++;
+      win[j % n] += rem;
+      if (mn == mx) break;
+    }
+    for (int i = 0; i < n; i++) win[i] += bets[i];      // uncalled remainder returned
+    for (auto& p : players) p.stack += win[p.id];
+    calculate_elimination_ranks();
+    over = true;
+    return true;
+  }
+  void calculate_elimination_ranks() {
+    int next_rank = 0;
+    for (auto& p : players) next_rank += p.elim_rank >= 0;
+    for (;;) {
+      int mn = 1 << 30, cnt = 0;
+      for (auto& p : players) if (p.elim_rank == -1 && p.stack == 0) mn = std::min(mn, p.total), cnt++;
+      if (!cnt) break;
+      int grp = 0;
+      for (auto& p : players)
+        if (p.elim_rank == -1 && p.stack == 0 && p.total == mn) p.elim_rank = next_rank, p.score = next_rank - n, grp++;
+      next_rank += grp;
+    }
+  }
+  bool is_game_over() const {
+    int alive = 0;
+    for (auto& p : players) alive += p.stack != 0;
+    return over && alive == 1;
+  }
+
+  static std::string cards_str(const int* c, int k, int pad) {
+    std::string s;
+    for (int i = 0; i < pad; i++) {
+      if (i) s += '_';
+      s += i < k ? (c[i] < 0 ? "?" : card_str(c[i])) : "X";
+    }
+    return s;
+  }
+  std::string board_str() const { return cards_str(board.data(), (int)board.size(), 5); }
+};
+
+class Engine : public Board {
+ public:
+  Sha1Prng rng;
+  int first_bb;
+  std::vector<int> deck;
+  int deck_idx = 0;
+  std::vector<RoundInfo> round_infos;                // index = turn (0 unused)
+  struct Showdown { std::string board; std::vector<std::string> cards; std::vector<char> elim; };
+  std::vector<Showdown> showdowns;                   // index = hand
+  std::vector<int> last_sent_round, last_sent_hand;
+  int last_hand_round = 0;
+  std::vector<LogEntry> log;
+  std::vector<int> replaced;                         // per seat: outputs the referee replaced (illegal or unparseable)
+  std::vector<std::string> replaced_log;             // the first few, "seat: raw -> shown" (debugging)
+
+  Engine(int n_, int64_t seed) : rng(seed) {
+    if (n_ < 2 || n_ > 4) throw std::invalid_argument("n must be 2..4");
+    first_bb = rng.next_int(n_);                     // Referee.java: first BB
+    static_cast<Board&>(*this) = Board(n_, first_bb);
+    round_infos.resize(MAX_TURN + 2);
+    showdowns.resize(1);
+    last_sent_round.assign(n, 0);
+    last_sent_hand.assign(n, 0);
+    replaced.assign(n, 0);
+    // Referee.init
+    reset_hand(); init_deck(); init_blind(); calculate_next_player();
+  }
+  void init_deck() {
+    deck.resize(52);
+    for (int i = 0; i < 52; i++) deck[i] = i;          // rank-major, CardUtils order
+    rng.shuffle(deck);
+    int r = rng.next_int(52);                           // Deck.cut
+    std::rotate(deck.begin(), deck.begin() + r, deck.end());
+    deck_idx = 0;
+  }
+  int draw() override { return deck[deck_idx++]; }
+
+  // ------------------------------------------------------------------ input protocol
+  void record_showdown() {
+    // ShowDownInfo: every non-eliminated player's hole cards are revealed (SHOW_FOLDED_CARDS=true)
+    Showdown sd;
+    sd.board = board_str();
+    for (auto& p : players) sd.cards.push_back(cards_str(p.hand, p.n_hand, p.n_hand)), sd.elim.push_back(p.eliminated);
+    if ((int)showdowns.size() <= hand_nb) showdowns.resize(hand_nb + 1);
+    showdowns[hand_nb] = sd;
+  }
+  Obs build_obs(int pid) {
+    Obs o;
+    o.small_blind = SMALL_BLIND; o.big_blind = BIG_BLIND; o.hand_nb_by_level = HAND_NB_BY_LEVEL;
+    o.level_mult = LEVEL_MULT; o.buy_in = TOTAL_BUY_IN / n; o.first_bb_id = first_bb; o.player_nb = n; o.player_id = pid;
+    o.round = turn; o.hand_nb = hand_nb;
+    for (auto& p : players) o.stacks.push_back(p.stack), o.chip_in_pot.push_back(p.total);
+    o.board = board_str();
+    o.cards = cards_str(players[pid].hand, players[pid].n_hand, players[pid].n_hand);
+    for (int r = last_sent_round[pid] + 1; r < turn; r++) {
+      const RoundInfo& ri = round_infos[r];
+      o.actions.push_back(std::to_string(ri.turn) + " " + std::to_string(ri.hand) + " " + std::to_string(ri.pid) + " " + ri.shown + " " + ri.board);
+    }
+    last_sent_round[pid] = turn - 1;
+    for (int h = last_sent_hand[pid] + 1; h < hand_nb; h++) {
+      const Showdown& sd = showdowns[h];
+      std::string parts;
+      for (size_t i = 0; i < sd.cards.size(); i++) {
+        if (i) parts += '_';
+        parts += sd.elim[i] ? "E_E" : sd.cards[i];
+      }
+      o.showdowns.push_back(std::to_string(h) + " " + sd.board + " " + parts);
+    }
+    last_sent_hand[pid] = hand_nb - 1;
+    o.possible = possible_actions();
+    return o;
+  }
+
+  // ------------------------------------------------------------------ Referee.gameTurn
+  void game_turn(int t, std::vector<Agent*>& agents) {
+    if (calculate_player_winnings()) return do_board_over();
+    if (over || t == 1) {                              // initBoard
+      if (t != 1) { reset_hand(); init_deck(); init_blind(); calculate_next_player(); }
+      deal_first();
+      calc_next = false;
+      return;
+    }
+    size_t n_cards = board.size();
+    end_turn();
+    if (n_cards != board.size()) {                     // all-in runout: a NONE round, no inputs
+      if (last_hand_round != hand_nb) {
+        turn++;
+        if (turn > MAX_TURN) throw std::runtime_error("referee would crash: NONE round 601 (InputSender.java:21,30)");
+        round_infos[turn] = {turn, hand_nb, -1, "NONE", board_str()};
+        last_hand_round = hand_nb;
+      }
+      return;
+    }
+    if (calculate_player_winnings()) return do_board_over();
+    if (turn == MAX_TURN) {                            // cancel the unfinished hand, end the game
+      if (!over) for (auto& p : players) p.stack += p.total, p.total = 0;
+      cancelled = true;
+      final_scores();
+      game_over = true;
+      return;
+    }
+    if (deal()) { calculate_next_player(); calc_next = false; return; }
+    if (calc_next) calculate_next_player();
+    calc_next = true;
+    int pid = next_player;
+    turn++;
+    Obs obs = build_obs(pid);
+    std::string out;
+    bool ok = agents[pid]->act(obs, out);
+    Parsed pr;
+    if (!ok) pr = {A_TIMEOUT, 0, true};
+    else pr = parse(out.substr(0, out.find(';')));
+    auto rp = replace(pr.t, pr.amount);
+    if (ok && (pr.err || rp.first != pr.t || (rp.first == A_BET && rp.second != pr.amount))) {
+      replaced[pid]++;
+      if (replaced_log.size() < 50) replaced_log.push_back(std::to_string(pid) + ": " + out + " -> " + act_name(rp.first) + (rp.first == A_BET ? "_" + std::to_string(rp.second) : ""));
+    }
+    std::string shown = act_name(rp.first);
+    if (rp.first == A_BET) shown += "_" + std::to_string(rp.second);
+    round_infos[turn] = {turn, hand_nb, pid, shown, board_str()};
+    last_hand_round = hand_nb;
+    do_action(rp.first, rp.second);
+    log.push_back({turn, hand_nb, pid, shown});
+  }
+  void do_board_over() {
+    record_showdown();
+    if (is_game_over()) { final_scores(); game_over = true; }
+  }
+  void final_scores() { for (auto& p : players) if (p.stack > 0) p.score = p.stack; }
+
+  struct Result { int hands, rounds; bool cancelled; std::vector<int> scores, stacks; };
+  Result run(std::vector<Agent*>& agents) {
+    for (int t = 1; !game_over && t <= MAX_REFEREE_TURN; t++) game_turn(t, agents);
+    Result r{hand_nb, turn, cancelled, {}, {}};
+    for (auto& p : players) r.scores.push_back(p.score), r.stacks.push_back(p.stack);
+    return r;
+  }
+};
+
+}  // namespace pk
+
+namespace pk {
+
+// Parse one turn of stdin into an Obs (InputSender.sendInputs layout).  `first` reads the 8 init
+// lines too; keep the same Obs across turns, since later turns rely on its player_nb.  Returns
+// false at end of input.
+inline bool read_obs(std::istream& in, bool first, Obs& o) {
+  auto getline = [&](std::string& s) { if (!std::getline(in, s)) return false; if (!s.empty() && s.back() == '\r') s.pop_back(); return true; };
+  std::string s;
+  if (first) {
+    if (!(in >> o.small_blind >> o.big_blind >> o.hand_nb_by_level >> o.level_mult >> o.buy_in >> o.first_bb_id >> o.player_nb >> o.player_id)) return false;
+  }
+  if (o.player_nb < 2 || o.player_nb > 4) return false;
+  if (!(in >> o.round >> o.hand_nb)) return false;
+  o.stacks.assign(o.player_nb, 0); o.chip_in_pot.assign(o.player_nb, 0);
+  for (int i = 0; i < o.player_nb; i++) in >> o.stacks[i] >> o.chip_in_pot[i];
+  in >> o.board >> o.cards;
+  int k;
+  in >> k; getline(s);                                  // rest of the count line
+  o.actions.clear(); for (int i = 0; i < k; i++) { getline(s); o.actions.push_back(s); }
+  in >> k; getline(s);
+  o.showdowns.clear(); for (int i = 0; i < k; i++) { getline(s); o.showdowns.push_back(s); }
+  in >> k; getline(s);
+  o.possible.clear(); for (int i = 0; i < k; i++) { getline(s); o.possible.push_back(s); }
+  return (bool)in;
+}
+
+class Tracker : public Board {
+ public:
+  int me = -1;
+  int first_bb = -1;
+  int last_hand_round = 0;
+  bool started = false;
+  bool decision_pending = false;
+  bool desynced = false;                 // a check failed this hand: stacks/pot were resynced from stdin
+  int mismatches = 0;                    // total failed checks (dev builds log them)
+  std::string last_error;
+
+  const int* hole() const { return players[me].hand; }
+
+  // "AD_QH_2S_X_X" -> {card ids, -1 for X}
+  static std::vector<int> parse_cards(const std::string& b) {
+    std::vector<int> out;
+    size_t i = 0;
+    while (i <= b.size()) {
+      size_t j = b.find('_', i);
+      std::string tok = b.substr(i, j == std::string::npos ? std::string::npos : j - i);
+      if (!tok.empty()) out.push_back(tok == "X" ? -1 : card_from(tok.c_str()));
+      if (j == std::string::npos) break;
+      i = j + 1;
+    }
+    return out;
+  }
+
+  enum Ev { EV_SETTLE, EV_NONE, EV_CANCEL, EV_DECISION, EV_CONTINUE };
+
+  // Referee.gameTurn between decisions, one branch per call; EV_CONTINUE means call again.
+  Ev step() {
+    if (decision_pending) return EV_DECISION;
+    if (calc_winnings) return EV_SETTLE;                 // (A)/(D): needs the showdown line
+    if (over) {                                          // (B) initBoard
+      reset_hand(); init_blind(); calculate_next_player(); deal_first(); calc_next = false;
+      return EV_CONTINUE;
+    }
+    size_t n_cards = board.size();
+    end_turn();
+    if (n_cards != board.size()) {                       // (C) all-in runout
+      if (last_hand_round != hand_nb) { turn++; last_hand_round = hand_nb; return EV_NONE; }
+      return EV_CONTINUE;
+    }
+    if (calc_winnings) return EV_SETTLE;
+    if (turn == MAX_TURN) { cancelled = true; game_over = true; return EV_CANCEL; }
+    if (deal()) { calculate_next_player(); calc_next = false; return EV_CONTINUE; }
+    if (calc_next) calculate_next_player();
+    calc_next = true;
+    decision_pending = true;
+    return EV_DECISION;
+  }
+
+  bool fail(const std::string& what) {
+    mismatches++; last_error = what; desynced = true;
+    return false;
+  }
+
+  // "AD_QH_2S_X_X": record known board cards; false on a contradiction
+  bool fill_board(const std::string& b) {
+    size_t i = 0, idx = 0;
+    while (i < b.size()) {
+      size_t j = b.find('_', i);
+      std::string tok = b.substr(i, j == std::string::npos ? std::string::npos : j - i);
+      if (tok != "X" && !tok.empty()) {
+        int c = card_from(tok.c_str());
+        if (c < 0) return fail("bad card " + tok);
+        if (idx >= board.size()) return fail("board longer than tracked: " + b + " vs " + board_str());
+        if (board[idx] == -1) board[idx] = c;
+        else if (board[idx] != c) return fail("board card differs: " + b + " vs " + board_str());
+      }
+      idx++;
+      if (j == std::string::npos) break;
+      i = j + 1;
+    }
+    return true;
+  }
+
+  // Apply a shown (post-replacement) action from an action line to next_player.
+  bool apply_shown(const std::string& a) {
+    if (a == "FOLD") do_action(A_FOLD, 0);
+    else if (a == "CHECK") do_action(A_CHECK, 0);
+    else if (a == "CALL") do_action(A_CALL, 0);
+    else if (a == "ALL-IN") do_action(A_ALL_IN, 0);
+    else if (a == "TIMEOUT") do_action(A_TIMEOUT, 0);
+    else if (a.rfind("BET_", 0) == 0) do_action(A_BET, atoi(a.c_str() + 4));
+    else return fail("unknown action " + a);
+    return true;
+  }
+
+  // Settle hand `hand_nb` from its showdown line "h BOARD c0_c1_E_E_..."
+  bool settle(const std::string& line) {
+    std::istringstream is(line);
+    int h; std::string b, cards;
+    is >> h >> b >> cards;
+    if (h != hand_nb) return fail("showdown for hand " + std::to_string(h) + " while tracking " + std::to_string(hand_nb));
+    if (!fill_board(b)) return false;
+    std::vector<std::string> tok;
+    size_t i = 0;
+    while (i <= cards.size()) { size_t j = cards.find('_', i); tok.push_back(cards.substr(i, j == std::string::npos ? std::string::npos : j - i)); if (j == std::string::npos) break; i = j + 1; }
+    if ((int)tok.size() != 2 * n) return fail("showdown cards: " + cards);
+    for (int p = 0; p < n; p++) {
+      if (tok[2 * p] == "E") { if (!players[p].eliminated) return fail("E_E for a live player"); continue; }
+      int c0 = card_from(tok[2 * p].c_str()), c1 = card_from(tok[2 * p + 1].c_str());
+      if (c0 < 0 || c1 < 0) return fail("bad showdown cards: " + cards);
+      players[p].hand[0] = c0; players[p].hand[1] = c1; players[p].n_hand = 2;
+    }
+    if (not_folded() > 1 && board.size() == 5)
+      for (int k = 0; k < 5; k++) if (board[k] < 0) return fail("showdown with unknown board card");
+    calculate_player_winnings();                         // sets over = true
+    if (is_game_over()) game_over = true;
+    return true;
+  }
+
+  // Process one turn's stdin.  Returns false if any check failed (state resynced from the snapshot).
+  bool apply(const Obs& o) {
+    bool ok = true;
+    if (!started) {
+      static_cast<Board&>(*this) = Board(o.player_nb, o.first_bb_id);
+      me = o.player_id; first_bb = o.first_bb_id; started = true;
+    }
+    desynced = false;
+    auto find_showdown = [&](int h) -> const std::string* {
+      for (auto& s : o.showdowns) if (atoi(s.c_str()) == h) return &s;
+      return nullptr;
+    };
+    // run the referee up to the next event, settling hands as their showdown lines allow
+    auto advance = [&]() -> Ev {
+      for (;;) {
+        Ev e = step();
+        if (e == EV_SETTLE) {
+          const std::string* sd = find_showdown(hand_nb);
+          if (!sd) { fail("no showdown line for hand " + std::to_string(hand_nb)); return EV_CANCEL; }
+          if (!settle(*sd)) return EV_CANCEL;
+          if (game_over) return EV_CANCEL;
+          continue;
+        }
+        if (e != EV_CONTINUE) return e;
+      }
+    };
+    for (auto& line : o.actions) {
+      std::istringstream is(line);
+      int r, h, pid; std::string a, b;
+      is >> r >> h >> pid >> a >> b;
+      Ev e = advance();
+      if (e == EV_CANCEL) { ok = false; break; }
+      if (a == "NONE") {
+        if (e != EV_NONE || turn != r || hand_nb != h) { ok = fail("NONE line out of sync: " + line); break; }
+        if (!fill_board(b)) { ok = false; break; }
+        continue;
+      }
+      if (e != EV_DECISION || turn + 1 != r || hand_nb != h || next_player != pid) {
+        ok = fail("action line out of sync (turn " + std::to_string(turn) + " hand " + std::to_string(hand_nb) +
+                  " next " + std::to_string(next_player) + "): " + line);
+        break;
+      }
+      turn++; last_hand_round = hand_nb; decision_pending = false;
+      if (!fill_board(b)) { ok = false; break; }
+      if (!apply_shown(a)) { ok = false; break; }
+    }
+    if (ok) {
+      Ev e = advance();
+      if (e != EV_DECISION || next_player != me || turn + 1 != o.round || hand_nb != o.hand_nb)
+        ok = fail("snapshot out of sync: tracked turn " + std::to_string(turn) + " hand " + std::to_string(hand_nb) +
+                  " next " + std::to_string(next_player) + " vs stdin round " + std::to_string(o.round) + " hand " + std::to_string(o.hand_nb));
+    }
+    if (ok) {
+      // our hole cards
+      if (o.cards.size() == 5) {
+        int c0 = card_from(o.cards.c_str()), c1 = card_from(o.cards.c_str() + 3);
+        if (c0 < 0 || c1 < 0) ok = fail("bad hole cards " + o.cards);
+        else { players[me].hand[0] = c0; players[me].hand[1] = c1; players[me].n_hand = 2; }
+      }
+      ok = ok && fill_board(o.board);
+      int shown = 0; for (int c : parse_cards(o.board)) shown += c >= 0;
+      if (ok && shown != (int)board.size()) ok = fail("board size: " + o.board + " vs " + board_str());
+      for (int p = 0; ok && p < n; p++)
+        if (players[p].stack != o.stacks[p] || players[p].total != o.chip_in_pot[p])
+          ok = fail("stacks differ at seat " + std::to_string(p) + ": tracked " + std::to_string(players[p].stack) + "/" +
+                    std::to_string(players[p].total) + " stdin " + std::to_string(o.stacks[p]) + "/" + std::to_string(o.chip_in_pot[p]));
+      if (ok && possible_actions() != o.possible) {
+        std::string a, b; for (auto& x : possible_actions()) a += x + ","; for (auto& x : o.possible) b += x + ",";
+        ok = fail("possible actions differ: tracked " + a + " stdin " + b);
+      }
+    }
+    if (!ok) resync(o);
+    return ok;
+  }
+
+  // Overwrite what the snapshot gives when the replay went wrong (stacks, chips, board); the
+  // betting state (min raise, raise cap) stays approximate until the next hand.
+  void resync(const Obs& o) {
+    desynced = true;
+    if (!started) return;
+    for (int p = 0; p < n && p < (int)o.stacks.size(); p++) players[p].stack = o.stacks[p], players[p].total = o.chip_in_pot[p];
+    turn = o.round - 1; hand_nb = o.hand_nb; next_player = me; decision_pending = true; calc_winnings = false; over = false;
+    board.clear();
+    for (int c : parse_cards(o.board)) if (c >= 0) board.push_back(c);
+    pot = 0; for (auto& p : players) pot += p.total;
+  }
+};
+
+}  // namespace pk
+// ---- bot/pf_rank.hpp
+// pf_rank.hpp - preflop class strength: PF_PCT[c] = share of all 1,326 combos whose class is at least as
+// strong as class c, by mean equity against a random hand (solvers/eq169.bin, combo-weighted).
+// Generated by the snippet in analysis/postmortem.py's history (see bot/README.md); class index as in pf_tables.hpp.
+namespace pf {
+const unsigned char PF_PCT100[169] = {44, 100, 99, 97, 98, 96, 91, 86, 77, 69, 59, 48, 33, 95, 33, 95, 93, 94, 92, 90, 82, 75, 65, 54, 45, 29, 92, 86, 20, 88, 89, 87, 85, 80, 71, 63, 53, 41, 26, 89, 83, 78, 12, 83, 81, 78, 74, 70, 60, 49, 39, 25, 89, 84, 79, 73, 7, 76, 72, 68, 63, 57, 46, 35, 24, 87, 81, 76, 70, 64, 4, 66, 61, 57, 51, 42, 32, 18, 81, 79, 73, 67, 62, 56, 3, 55, 51, 44, 37, 28, 16, 75, 71, 70, 64, 58, 52, 47, 3, 43, 38, 30, 21, 14, 67, 64, 60, 59, 53, 47, 40, 34, 2, 31, 23, 15, 10, 58, 54, 52, 50, 47, 40, 34, 28, 22, 2, 19, 13, 8, 48, 45, 41, 39, 37, 34, 27, 22, 17, 14, 1, 11, 6, 38, 36, 33, 28, 25, 23, 20, 14, 10, 9, 8, 1, 5, 25, 20, 17, 17, 17, 13, 10, 9, 7, 5, 4, 3, 0};
+}  // namespace pf
+// ---- bot/pf_tables.hpp
+// pf_tables.hpp - HU jam/fold Nash (chip EV) from solvers/pf.py via solvers/export_pf.py.
+// Class index r1*13+r2 (ranks 0..12 = 2..A; pair r1==r2, suited r1>r2, offsuit r1<r2).
+// Bit k of PF_JAM[c] / PF_CALL[c]: at effective stack PF_STACKS[k] BB the SB jams / the BB calls a jam.
+// S= 2 BB: SB jams 90.3% of hands, BB calls 100.0%, SB value +0.010 BB/hand
+// S= 3 BB: SB jams 77.7% of hands, BB calls 92.8%, SB value +0.052 BB/hand
+// S= 4 BB: SB jams 73.8% of hands, BB calls 73.2%, SB value +0.066 BB/hand
+// S= 5 BB: SB jams 71.3% of hands, BB calls 62.0%, SB value +0.056 BB/hand
+// S= 6 BB: SB jams 68.6% of hands, BB calls 54.4%, SB value +0.038 BB/hand
+// S= 7 BB: SB jams 66.5% of hands, BB calls 48.4%, SB value +0.017 BB/hand
+// S= 8 BB: SB jams 62.0% of hands, BB calls 45.4%, SB value -0.004 BB/hand
+// S= 9 BB: SB jams 59.9% of hands, BB calls 40.6%, SB value -0.025 BB/hand
+// S=10 BB: SB jams 58.4% of hands, BB calls 37.6%, SB value -0.045 BB/hand
+// S=12 BB: SB jams 53.5% of hands, BB calls 33.0%, SB value -0.082 BB/hand
+// S=15 BB: SB jams 45.7% of hands, BB calls 28.4%, SB value -0.127 BB/hand
+// S=20 BB: SB jams 40.3% of hands, BB calls 21.7%, SB value -0.183 BB/hand
+// S=25 BB: SB jams 36.0% of hands, BB calls 17.3%, SB value -0.229 BB/hand
+namespace pf {
+const int PF_NS = 13;
+const int PF_STACKS[13] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25};
+const unsigned short PF_JAM[169] = {8191, 0, 0, 0, 0, 0, 0, 1, 1, 7, 63, 511, 8191, 0, 8191, 0, 0, 0, 0, 1, 1, 3, 15, 63, 1023, 8191, 0, 505, 8191, 1, 1, 1, 1, 1, 3, 15, 63, 1023, 8191, 1, 1017, 4095, 8191, 1, 1, 3, 3, 7, 31, 127, 1023, 8191, 1, 49, 2047, 8191, 8191, 511, 63, 7, 15, 31, 255, 2047, 8191, 1, 1, 1023, 4095, 8191, 8191, 1023, 511, 255, 127, 511, 2047, 8191, 1, 1, 319, 2047, 8191, 8191, 8191, 4095, 2047, 1023, 1023, 2047, 8191, 3, 7, 15, 1023, 8191, 8191, 8191, 8191, 8191, 8191, 4095, 4095, 8191, 31, 63, 511, 1023, 4095, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 127, 511, 1023, 1023, 2047, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 1023, 1023, 2047, 4095, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 2047, 2047, 4095, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191};
+const unsigned short PF_CALL[169] = {1023, 1, 1, 1, 1, 1, 1, 3, 3, 7, 15, 127, 2047, 3, 4095, 3, 3, 3, 1, 1, 3, 3, 7, 15, 127, 2047, 3, 3, 8191, 3, 3, 3, 3, 3, 3, 7, 31, 255, 2047, 3, 7, 7, 8191, 3, 3, 3, 3, 3, 15, 31, 511, 4095, 3, 3, 7, 7, 8191, 7, 7, 7, 7, 15, 63, 511, 4095, 3, 3, 7, 7, 15, 8191, 7, 15, 15, 31, 127, 1023, 8191, 3, 3, 7, 7, 15, 31, 8191, 31, 31, 63, 255, 1023, 8191, 3, 7, 7, 7, 15, 31, 127, 8191, 127, 255, 511, 2047, 8191, 7, 7, 15, 15, 31, 63, 255, 511, 8191, 1023, 2047, 4095, 8191, 15, 15, 31, 31, 63, 127, 511, 1023, 2047, 8191, 2047, 8191, 8191, 63, 63, 127, 127, 511, 511, 1023, 2047, 4095, 8191, 8191, 8191, 8191, 511, 511, 1023, 1023, 1023, 2047, 2047, 4095, 8191, 8191, 8191, 8191, 8191, 4095, 4095, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191, 8191};
+}  // namespace pf
+
+namespace bot {
+
+typedef std::chrono::steady_clock Clock;
+
+struct Rng {                                           // splitmix64
+  uint64_t x;
+  __attribute__((always_inline)) inline uint64_t next() {
+    uint64_t z = (x += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+  }
+  __attribute__((always_inline)) inline int below(int n) { return (int)((next() >> 32) * (uint64_t)n >> 32); }
+};
+
+struct Budget {
+  double ms = 20;            // wall-clock budget for the Monte Carlo (from t0); <= 0: trials only
+  int max_trials = 100000;   // hard cap on trials
+  int min_trials = 2000;     // always run at least this many
+};
+
+// Preflop class index as in solvers/eq.c and pf_tables.hpp: pair r*13+r, suited hi*13+lo, offsuit lo*13+hi.
+inline int hand_class(int c0, int c1) {
+  int r0 = c0 >> 2, r1 = c1 >> 2, hi = r0 > r1 ? r0 : r1, lo = r0 > r1 ? r1 : r0;
+  if (r0 == r1) return r0 * 13 + r0;
+  return (c0 & 3) == (c1 & 3) ? hi * 13 + lo : lo * 13 + hi;
+}
+
+// ---- ICM push/fold charts for 3-4 players (bot/pfn_tables.hpp, solved by solvers/pfn): decoded once per process
+struct PfnGame {
+  int N = 0, nt = 0, L = 0, nn = 0, P = 0;
+  const double* lv = nullptr; const int* nodes = nullptr;
+  std::vector<unsigned char> rank, pos, thr;   // rank[node][169]; pos[node][class] = rank position; thr[node][P]
+};
+// 14 payload bits per CJK character (tools/cjk14.py); other characters are skipped
+inline int cjk14_decode(const char* s, unsigned char* out, int out_max) {
+  int n = 0, bits = 0; unsigned acc = 0;
+  for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+    if ((*p & 0xF0) != 0xE0) continue;
+    unsigned code = ((p[0] & 15u) << 12) | ((p[1] & 63u) << 6) | (p[2] & 63u);
+    p += 2;
+    acc = (acc << 14) | (code - 0x4E00u); bits += 14;
+    while (bits >= 8) { if (n >= out_max) return -1; bits -= 8; out[n++] = (unsigned char)(acc >> bits); }
+    acc &= (1u << bits) - 1;
+  }
+  return n;
+}
+inline const std::vector<PfnGame>& pfn_games() {
+  static const std::vector<PfnGame> G = [] {
+    std::vector<PfnGame> v;
+    for (int gi = 0; gi < pfn_t::NG; gi++) {
+      const pfn_t::GameT& t = pfn_t::GAMES[gi];
+      PfnGame g; g.N = t.N; g.nt = t.nt; g.L = t.L; g.nn = t.nn; g.lv = t.levels; g.nodes = t.nodes;
+      g.P = 1; for (int i = 0; i < g.N; i++) g.P *= g.L;
+      int need = g.nn * 169 + g.nn * g.P;
+      std::vector<unsigned char> buf(need + 2);
+      if (cjk14_decode(t.data, buf.data(), (int)buf.size()) < need) continue;   // corrupt: chart unusable
+      g.rank.assign(buf.begin(), buf.begin() + g.nn * 169);
+      g.thr.assign(buf.begin() + g.nn * 169, buf.begin() + need);
+      g.pos.assign(g.nn * 169, 0);
+      for (int k = 0; k < g.nn; k++) for (int r = 0; r < 169; r++) g.pos[k * 169 + g.rank[k * 169 + r]] = (unsigned char)r;
+      v.push_back(std::move(g));
+    }
+    return v;
+  }();
+  return G;
+}
+// number of classes to jam at node k for stacks st[0..N) (BB, action order): multilinear in log-stack between levels
+inline double pfn_threshold(const PfnGame& g, int k, const double* st) {
+  int lo[4]; double fr[4];
+  for (int i = 0; i < g.N; i++) {
+    double s = std::min(std::max(st[i], g.lv[0]), g.lv[g.L - 1]);
+    int j = 0; while (j + 2 < g.L && g.lv[j + 1] <= s) j++;
+    lo[i] = j; fr[i] = (std::log(s) - std::log(g.lv[j])) / (std::log(g.lv[j + 1]) - std::log(g.lv[j]));
+  }
+  double T = 0;
+  for (int c = 0; c < (1 << g.N); c++) {
+    double w = 1; int idx = 0;
+    for (int i = 0; i < g.N; i++) { int bit = c >> i & 1; w *= bit ? fr[i] : 1 - fr[i]; idx = idx * g.L + lo[i] + bit; }
+    if (w > 0) T += w * g.thr[k * g.P + idx];
+  }
+  return T;
+}
+inline const PfnGame* pfn_find(int N, int nt) {
+  for (const PfnGame& g : pfn_games()) if (g.N == N && g.nt == nt) return &g;
+  return nullptr;
+}
+
+class Bot {
+ public:
+  pk::Tracker tr;
+  Rng rng{0x1234567ull};
+  // diagnostics of the last decision
+  int last_trials = 0;
+  double last_equity = 0;
+  std::string last_tag;
+  long decisions = 0, trials_total = 0;
+  bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
+  double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
+  double pfn_max_bb = 20;                 // 3-4 players, preflop: the ICM push/fold chart decides first-in, over limps and against a raise up to this stack (BB); 20 beat 12 in the arena
+
+  // table-free value of the best 5 of k (5..7) cards
+  static uint32_t slow_partial(const int* c, int k) {
+    if (k == 7) return e7::ev7(c);
+    uint32_t best = 0; int five[5];
+    if (k == 5) return pk::eval5(c);
+    for (int skip = 0; skip < 6; skip++) {                 // k == 6
+      int q = 0; for (int i = 0; i < 6; i++) if (i != skip) five[q++] = c[i];
+      best = std::max(best, pk::eval5(five));
+    }
+    return best;
+  }
+  __attribute__((always_inline)) inline uint32_t ev7(const int* c) const {
+    if (!use_fast) return e7::ev7(c);
+    pe::H h = pe::E;
+    for (int i = 0; i < 7; i++) h = pe::add(h, c[i]);
+    return pe::ev(h);
+  }
+
+  // Our share of the pot at showdown against n_opp uniformly random hands, given the known board.
+  double equity(const int* hole, const int* board, int n_board, int n_opp, const Budget& b, Clock::time_point t0) {
+    int used[7], nu = 0;
+    used[nu++] = hole[0]; used[nu++] = hole[1];
+    for (int i = 0; i < n_board; i++) used[nu++] = board[i];
+    int deck[52], nd = 0;
+    for (int c = 0; c < 52; c++) {
+      bool u = false;
+      for (int i = 0; i < nu; i++) u |= used[i] == c;
+      if (!u) deck[nd++] = c;
+    }
+    int need = 5 - n_board + 2 * n_opp;
+    int c7[7];
+    for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
+    double share = 0;
+    int trials = 0;
+    for (;;) {
+      for (int t = 0; t < 512; t++, trials++) {
+        // partial Fisher-Yates for `need` cards
+        for (int i = 0; i < need; i++) { int j = i + rng.below(nd - i); int tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp; }
+        for (int i = n_board; i < 5; i++) c7[2 + i] = deck[i - n_board];
+        c7[0] = hole[0]; c7[1] = hole[1];
+        uint32_t mv = ev7(c7);
+        int better = 0, tie = 0;
+        for (int o = 0; o < n_opp; o++) {
+          int k = 5 - n_board + 2 * o;
+          c7[0] = deck[k]; c7[1] = deck[k + 1];
+          uint32_t ov = ev7(c7);
+          if (ov > mv) { better = 1; break; }
+          tie += ov == mv;
+        }
+        if (!better) share += 1.0 / (1 + tie);
+      }
+      if (trials >= b.max_trials) break;
+      if (trials >= b.min_trials && b.ms > 0 &&
+          std::chrono::duration<double, std::milli>(Clock::now() - t0).count() > b.ms) break;
+      if (b.ms <= 0 && trials >= b.min_trials) break;
+    }
+    last_trials = trials; trials_total += trials;
+    return share / trials;
+  }
+
+  // tournament equity (cpp/icm.hpp: Malmuth-Harville with the TrueSkill payouts) of `seat` for the hypothetical
+  // end-of-hand stacks v[0..n) over all seats; seats that busted in earlier hands (alive_start false) are left
+  // out so that a seat busting now takes the right place
+  static double icm_of(const double* v, const bool* alive_start, int n, int seat) {
+    double c[4]; int m = 0, me = 0;
+    for (int i = 0; i < n; i++) if (alive_start[i]) { if (i == seat) me = m; c[m++] = v[i]; }
+    return icm::icm(c, m, me, n);
+  }
+
+  // Opponent combos ranked by made-hand strength on the board (preflop: by PF_PCT100).  Fills
+  // `out` with the strongest `frac` share of the combos that do not conflict with our cards/board.
+  int top_range(const int* hole, const int* board, int n_board, double frac, int (*out)[2]) {
+    bool used[52] = {false};
+    used[hole[0]] = used[hole[1]] = true;
+    for (int i = 0; i < n_board; i++) used[board[i]] = true;
+    static thread_local int combo[1326][2]; static thread_local int key[1326]; static thread_local int idx[1326];
+    int m = 0;
+    int c7[7]; for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
+    for (int a = 0; a < 52; a++) if (!used[a])
+      for (int c = a + 1; c < 52; c++) if (!used[c]) {
+        combo[m][0] = a; combo[m][1] = c;
+        if (n_board >= 3) {                                // made-hand rank on the known board (5-7 cards)
+          c7[0] = a; c7[1] = c;
+          if (n_board == 5) key[m] = (int)ev7(c7);
+          else {                                           // flop/turn: rank by the best 5-of-(2+n_board) cards
+            pe::H h = pe::E; for (int i = 0; i < 2 + n_board; i++) h = pe::add(h, c7[i]);
+            key[m] = use_fast ? (int)pe::ev(h) : (int)slow_partial(c7, 2 + n_board);
+          }
+        } else key[m] = 100 - pf::PF_PCT100[hand_class(a, c)];
+        idx[m] = m; m++;
+      }
+    std::sort(idx, idx + m, [&](int x, int y) { return key[x] > key[y]; });
+    int k = std::max(1, std::min(m, (int)(frac * m + 0.5)));
+    for (int i = 0; i < k; i++) out[i][0] = combo[idx[i]][0], out[i][1] = combo[idx[i]][1];
+    return k;
+  }
+
+  // Our pot share against n_opp opponents whose hands are drawn uniformly from `range` (k combos).
+  double equity_vs_range(const int* hole, const int* board, int n_board, int n_opp, int (*range)[2], int k, const Budget& b, Clock::time_point t0) {
+    int deck[52], nd = 0;
+    bool used[52] = {false};
+    used[hole[0]] = used[hole[1]] = true;
+    for (int i = 0; i < n_board; i++) used[board[i]] = true;
+    int c7[7];
+    for (int i = 0; i < n_board; i++) c7[2 + i] = board[i];
+    double share = 0; int trials = 0;
+    int oh[3][2];
+    for (;;) {
+      for (int t = 0; t < 256; t++) {
+        // draw opponent hands from the range without card conflicts
+        bool ok = true;
+        for (int o = 0; o < n_opp && ok; o++) {
+          int tries = 0;
+          for (;;) {
+            int r = rng.below(k); oh[o][0] = range[r][0]; oh[o][1] = range[r][1];
+            bool clash = false;
+            for (int q = 0; q < o; q++) clash |= oh[q][0] == oh[o][0] || oh[q][0] == oh[o][1] || oh[q][1] == oh[o][0] || oh[q][1] == oh[o][1];
+            if (!clash) break;
+            if (++tries > 20) { ok = false; break; }
+          }
+        }
+        if (!ok) continue;
+        nd = 0;
+        for (int c = 0; c < 52; c++) {
+          bool u = used[c];
+          for (int o = 0; o < n_opp; o++) u |= oh[o][0] == c || oh[o][1] == c;
+          if (!u) deck[nd++] = c;
+        }
+        int need = 5 - n_board;
+        for (int i = 0; i < need; i++) { int j = i + rng.below(nd - i); int tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp; }
+        for (int i = n_board; i < 5; i++) c7[2 + i] = deck[i - n_board];
+        c7[0] = hole[0]; c7[1] = hole[1];
+        uint32_t mv = ev7(c7);
+        int better = 0, tie = 0;
+        for (int o = 0; o < n_opp; o++) {
+          c7[0] = oh[o][0]; c7[1] = oh[o][1];
+          uint32_t ov = ev7(c7);
+          if (ov > mv) { better = 1; break; }
+          tie += ov == mv;
+        }
+        if (!better) share += 1.0 / (1 + tie);
+        trials++;
+      }
+      if (trials >= b.max_trials / 2) break;
+      if (trials >= b.min_trials && b.ms > 0 && std::chrono::duration<double, std::milli>(Clock::now() - t0).count() > b.ms) break;
+      if (b.ms <= 0 && trials >= b.min_trials) break;
+    }
+    last_trials = trials; trials_total += trials;
+    return trials ? share / trials : 0.5;
+  }
+
+  // The decision for this turn.  t0 is when the turn's input arrived.
+  std::string act(const pk::Obs& o, const Budget& b, Clock::time_point t0) {
+    decisions++;
+    tr.apply(o);                                     // on failure the tracker resyncs from the snapshot
+    const pk::Player& me = tr.players[tr.me];
+    rng.x ^= (uint64_t)o.round * 0x9E3779B97F4A7C15ull ^ (uint64_t)me.hand[0] << 8 ^ (uint64_t)me.hand[1] << 16;
+    // what the referee offers
+    bool can_check = false, can_raise = false, can_allin = false, can_call = false;
+    int min_bet = 0;
+    for (auto& a : o.possible) {
+      if (a == "CHECK") can_check = true; else if (a == "CALL") can_call = true; else if (a == "ALL-IN") can_allin = true;
+      else if (a.compare(0, 4, "BET_") == 0) can_raise = true, min_bet = atoi(a.c_str() + 4);
+    }
+    int n = tr.n, stack = me.stack;
+    int pot = 0, live = 0, alive = 0, opp_max_start = 0, max_other_total = 0, aggressor_total = 0;
+    for (auto& p : tr.players) {
+      pot += p.total;
+      live += !p.folded;
+      alive += p.stack + p.total > 0;
+      if (p.id != tr.me && !p.folded) opp_max_start = std::max(opp_max_start, p.stack + p.total), max_other_total = std::max(max_other_total, p.total);
+    }
+    if (tr.last_raiser >= 0 && tr.last_raiser != tr.me) aggressor_total = tr.players[tr.last_raiser].total;
+    int n_opp = std::max(1, live - 1);
+    int call = tr.call_amount(me);
+    int bb = tr.bb;
+    int my_start = stack + me.total;
+    int eff = std::min(my_start, opp_max_start);         // effective stack this hand, chips
+    double eff_bb = (double)eff / bb;
+    bool preflop = tr.board.empty();
+    int n_board = (int)tr.board.size();
+    const int* hole = me.hand;
+    const int* board = tr.board.data();
+    if (hole[0] < 0) { last_tag = "nocards"; return can_check ? "CHECK" : "FOLD"; }
+    int cls = hand_class(hole[0], hole[1]);
+    auto bet = [&](int amount) -> std::string {           // a raise adding `amount` chips, made legal
+      if (!can_raise || amount >= stack) return can_allin ? "ALL-IN" : (can_call ? "CALL" : "CHECK");
+      return "BET " + std::to_string(std::max(amount, min_bet));
+    };
+    auto call_s = [&]() -> std::string { return call >= stack ? "ALL-IN" : can_check ? "CHECK" : "CALL"; };
+    int call_amt = std::min(call, stack);
+    int my_commit = me.total + call_amt;
+    double winnable = my_commit;                          // the pot we can actually win: each opponent's chips up to our commitment
+    for (auto& p : tr.players) if (p.id != tr.me) winnable += std::min(p.total, my_commit);
+    double odds = call_amt > 0 ? call_amt / winnable : 0;
+
+    // ---- heads-up preflop at <= jamfold_max_bb: jam/fold Nash (chip EV).  SB first in: jam or fold.  BB facing a jam: call or fold.
+    if (preflop && alive == 2 && live == 2 && eff_bb <= jamfold_max_bb) {
+      int k = 0;
+      for (int i = 1; i < pf::PF_NS; i++)
+        if (std::abs(pf::PF_STACKS[i] - eff_bb) < std::abs(pf::PF_STACKS[k] - eff_bb)) k = i;
+      const pk::Player* opp = nullptr;
+      for (auto& p : tr.players) if (p.id != tr.me && !p.folded) opp = &p;
+      if (tr.last_raiser == -1 && tr.me == tr.sb_id && (can_raise || can_allin)) {
+        last_tag = "pf-sb"; last_equity = -1; last_trials = 0;
+        return (pf::PF_JAM[cls] >> k & 1) ? "ALL-IN" : "FOLD";
+      }
+      if (tr.me == tr.bb_id && opp && opp->allin && call > 0) {
+        last_tag = "pf-bb"; last_equity = -1; last_trials = 0;
+        return (pf::PF_CALL[cls] >> k & 1) ? call_s() : "FOLD";
+      }
+    }
+
+    // ---- 3-4 players preflop, jam/fold history so far: the ICM push/fold chart (pfn_tables.hpp).  Facing a jam
+    // always; first in when our stack is short.  Any limp or raise before us is off the chart's tree.
+    if (preflop && (alive == 3 || alive == 4) && (can_raise || can_allin || call > 0)) {
+      int order[4], no = 0;                             // action order: after the BB round to the BB; alive seats only
+      for (int s = 1; s <= n; s++) { int id = (tr.bb_id + s) % n; if (tr.players[id].stack + tr.players[id].total > 0) order[no++] = id; }
+      int mi = -1; for (int j = 0; j < no; j++) if (order[j] == tr.me) mi = j;
+      bool ontree = mi >= 0 && no == alive, raised = false, shortie = (double)my_start / bb <= pfn_max_bb; int prefix = 0, limpers = 0;
+      for (int j = 0; j < mi && ontree; j++) {
+        const pk::Player& p = tr.players[order[j]];
+        if (p.folded) continue;
+        if (p.allin || (prefix != 0 && p.rnd > bb)) prefix |= 1 << j;   // a jam, or a call of one by a bigger stack
+        else if (prefix == 0 && p.rnd <= bb) limpers++;                 // a limp: the chart has no limp node, count it as a fold
+        else if (shortie && !raised && p.rnd > bb) { raised = true; prefix |= 1 << j; }   // a raise: short, we answer it jam or fold, as if it were a jam
+        else ontree = false;                                            // a raise while we are deep: off the chart's tree
+      }
+      for (int j = mi + 1; j < no && ontree; j++) if (tr.players[order[j]].spoken) ontree = false;
+      const PfnGame* g = ontree ? pfn_find(alive, n) : nullptr;
+      bool facing_jam = prefix != 0;
+      // a jam much shorter than our stack with players still to act behind us is not the chart's "call" (which
+      // commits our whole stack): the pot-odds rules below price that
+      bool small_call = facing_jam && !raised && call_amt < 0.4 * stack && mi + 1 < no;
+      if (g && !small_call && (facing_jam || shortie)) {
+        int nd = (1 << mi) - 1 + prefix, k = -1;
+        for (int q = 0; q < g->nn; q++) if (g->nodes[q] == nd) k = q;
+        if (k >= 0) {
+          double st[4]; for (int j = 0; j < no; j++) st[j] = (double)(tr.players[order[j]].stack + tr.players[order[j]].total) / bb;
+          double T = pfn_threshold(*g, k, st);
+          bool go = g->pos[k * 169 + cls] + 0.5 < T;
+          last_tag = raised ? "pfn-rejam" : facing_jam ? "pfn-call" : limpers ? "pfn-jam-lim" : "pfn-jam"; last_equity = -1; last_trials = 0;
+          if (go) return facing_jam && !raised ? call_s() : can_allin ? "ALL-IN" : bet(stack);
+          if (can_check) return "CHECK";                                // the BB's free option is never folded
+          if (facing_jam || !limpers) return "FOLD";
+          // chart says fold over limpers: completing is cheap, let the rules below price it
+        }
+      }
+    }
+
+    // ---- the opponent's range: whoever bet last is assumed to hold a strong hand
+    double frac = 1.0;                                    // 1 = uniform random
+    if (call > 0 && tr.last_raiser >= 0 && tr.last_raiser != tr.me) {
+      double bet_bb = (double)std::max(aggressor_total, max_other_total) / bb;
+      if (preflop) {
+        bool shove = tr.players[tr.last_raiser].allin || bet_bb >= 12;
+        if (shove && bet_bb <= pf::PF_STACKS[pf::PF_NS - 1]) {   // a shove at a depth where we shove too: the Nash jam width there
+          int k = pf::PF_NS - 1;
+          for (int i = 0; i < pf::PF_NS; i++) if (pf::PF_STACKS[i] >= bet_bb) { k = i; break; }
+          int cnt = 0; for (int c = 0; c < 169; c++) cnt += (pf::PF_JAM[c] >> k & 1) * ((c / 13 == c % 13) ? 6 : (c / 13 > c % 13) ? 4 : 12);
+          frac = std::max(0.15, cnt / 1326.0);
+        } else if (shove) frac = 1.0;                     // deeper shoves are off our tree: the uniform (epsilon-floor) belief
+        else frac = tr.raise_nb >= 3 ? 0.2 : 0.35;        // open / 3-bet
+      } else {
+        double rel = (double)call / std::max(1, pot - call);
+        frac = std::min(0.65, std::max(0.3, 0.65 - 0.35 * std::min(1.0, rel)));
+      }
+    }
+    static thread_local int range[1326][2];
+    double e;
+    if (frac < 1.0) {
+      int k = top_range(hole, board, n_board, frac, range);
+      e = equity_vs_range(hole, board, n_board, n_opp, range, k, b, t0);
+    } else e = equity(hole, board, n_board, n_opp, b, t0);
+    last_equity = e;
+
+    // ---- facing a bet
+    if (call > 0) {
+      bool big = call_amt >= 0.4 * stack;                 // calling off (most of) the stack
+      if (big) {
+        if (alive >= 3) {                                 // tournament equity decides
+          double st[4], w[4], l[4];
+          for (int i = 0; i < n; i++) st[i] = tr.players[i].stack + tr.players[i].total;
+          for (int i = 0; i < n; i++) w[i] = l[i] = st[i];
+          // win: we take from each player min(their total, our commit); the rest stays with them
+          w[tr.me] = stack - call_amt + my_commit;
+          int big_opp = -1;
+          for (int i = 0; i < n; i++) if (i != tr.me) {
+            double take = std::min(tr.players[i].total, my_commit);
+            w[tr.me] += take; w[i] = st[i] - take;
+            if (!tr.players[i].folded && (big_opp < 0 || st[i] > st[big_opp])) big_opp = i;
+          }
+          // lose: our commit goes to the biggest live opponent
+          l[tr.me] = stack - call_amt;
+          if (big_opp >= 0) l[big_opp] = st[big_opp] + my_commit;
+          double f[4]; for (int i = 0; i < n; i++) f[i] = st[i]; f[tr.me] = stack;   // fold: our chips in the pot are gone
+          if (big_opp >= 0) f[big_opp] += me.total;
+          bool as[4]; for (int i = 0; i < n; i++) as[i] = st[i] > 0;
+          double ev_call = e * icm_of(w, as, n, tr.me) + (1 - e) * icm_of(l, as, n, tr.me), ev_fold = icm_of(f, as, n, tr.me);
+          last_tag = "icm";
+          return ev_call > ev_fold + 0.002 ? call_s() : "FOLD";
+        }
+        double m = 0.04 * std::min(1.0, std::max(0.0, (eff_bb - 15) / 35));   // deep heads-up: the option to wait
+        last_tag = "callff";
+        return e > odds + m ? call_s() : "FOLD";
+      }
+      if (preflop && tr.last_raiser == -1) {              // unopened pot, we are not the BB: open or complete
+        double thr = 0.50 + 0.03 * (n_opp - 1);
+        if (e > thr && can_raise) { last_tag = "open"; return bet((int)(2.5 * bb) - me.rnd); }
+        last_tag = "complete";
+        return e > odds + 0.03 ? "CALL" : "FOLD";
+      }
+      if (e > 0.75 && can_raise) { last_tag = "raise"; return bet(pot + call); }
+      last_tag = "call";
+      return e > odds + 0.02 ? call_s() : "FOLD";
+    }
+    // ---- check is free: value-bet thinner (a checking opponent is weak)
+    double thr = 0.55 + 0.04 * (n_opp - 1);
+    if (preflop && tr.me == tr.bb_id && tr.last_raiser == -1) thr = 0.55 + 0.03 * (n_opp - 1);   // BB option
+    if (e > thr && can_raise) { last_tag = "bet"; return bet(std::max(bb, (int)(0.6 * pot))); }
+    last_tag = "check";
+    return "CHECK";
+  }
+};
+
+}  // namespace bot
+
+const bool DEBUG = true;      // stderr diagnostics (stderr is free on CodinGame; stdout is the action)
+const bool PONDER = false;    // probe: a spinning thread; log its progress between turns
+
+std::atomic<long> ponder_counter{0};
+std::atomic<bool> tables_ready{false};
+std::atomic<long> init_ms{0};
+
+int main() {
+  typedef std::chrono::steady_clock Clock;
+  auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+  std::ios::sync_with_stdio(false);
+  auto t_start = Clock::now();
+  std::thread([t_start, &ms] {
+    pe::init();
+    init_ms.store((long)ms(t_start, Clock::now()), std::memory_order_relaxed);
+    tables_ready.store(true, std::memory_order_release);
+  }).detach();
+  auto t_init = Clock::now();
+  bot::Bot b;
+  bot::Budget budget;
+  budget.ms = 15;                                       // placeholder until CodinGame latency is measured (max observed turn 24 ms at 20)
+  pk::Obs o;
+  bool first = true;
+  Clock::time_point t_last_flush = t_init;
+  long last_counter = 0;
+  if (PONDER) std::thread([] { for (;;) ponder_counter.fetch_add(1, std::memory_order_relaxed); }).detach();
+  bool fast_seen = false;
+  while (pk::read_obs(std::cin, first, o)) {
+    auto t0 = Clock::now();
+    b.use_fast = tables_ready.load(std::memory_order_acquire);
+    if (DEBUG && b.use_fast && !fast_seen) {
+      fast_seen = true;
+      fprintf(stderr, "tables ready at round %d: pe_init_ms=%ld (background), %.0f ms after process start\n", o.round, init_ms.load(), ms(t_start, t0));
+    }
+    if (first && DEBUG) {
+      // probes: compile mode, evaluator start-up, Monte Carlo speed over 10 ms
+      int hole[2] = {0, 5}, board[3] = {10, 23, 40};
+      bot::Budget bench; bench.ms = 10; bench.max_trials = 1 << 30; bench.min_trials = 1;
+      auto tb = Clock::now();
+      b.equity(hole, board, 3, 1, bench, tb);
+      double bms = ms(tb, Clock::now());
+      fprintf(stderr, "probe __cplusplus=%ld first_input_at_ms=%.0f tables_ready=%d mc_trials_per_s=%.2fM (%s) n=%d id=%d\n",
+              (long)__cplusplus, ms(t_start, t0), (int)b.use_fast, b.last_trials / bms / 1000.0, b.use_fast ? "pe7c" : "eval7_slow", o.player_nb, o.player_id);
+    }
+    std::string out = b.act(o, budget, t0);
+    std::cout << out << "\n" << std::flush;
+    auto t1 = Clock::now();
+    if (DEBUG) {
+      long c = ponder_counter.load(std::memory_order_relaxed);
+      fprintf(stderr, "r%d h%d turn_ms=%.2f since_last_flush_ms=%.0f trials=%d eq=%.3f %s%s%s%s\n", o.round, o.hand_nb, ms(t0, t1),
+              ms(t_last_flush, t0), b.last_trials, b.last_equity, b.last_tag.c_str(), b.use_fast ? "" : " slow-eval",
+              b.tr.desynced ? " DESYNC:" : "", b.tr.desynced ? b.tr.last_error.c_str() : "");
+      if (PONDER) fprintf(stderr, "ponder_delta=%ld\n", c - last_counter);
+      last_counter = c;
+    }
+    t_last_flush = t1;
+    first = false;
+  }
+  return 0;
+}

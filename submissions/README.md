@@ -10,7 +10,9 @@ environment. Regenerate with `make bot` (`tools/bundle.py --minify`).
 | `m0_1_min.cpp` | M0.1: ICM for big calls with 3-4 alive, jam/fold heads-up to 12 BB, range beliefs, 15 ms compute budget; `DEBUG = true`, `PONDER = false`. Arena: +0.026 payout/game over M0. | commit 7411e61 |
 | `m0_1_bundled.cpp` | the same, readable | commit 7411e61 |
 | `m0_1b_min.cpp` | M0.1b: same policy as M0.1; the pe7c tables are built in a background thread and a table-free evaluator plays until they are ready (CodinGame's start-up phase took 2.3 s). First-turn probe prints `first_input_at_ms` and `tables_ready`. | this commit |
-| `m0_1b_bundled.cpp` | the same, readable | this commit |
+| `m0_1b_bundled.cpp` | the same, readable | commit 5ec3b63 |
+| `m1_min.cpp` | M1: ICM push/fold charts for 3-4 players (solved offline, `solvers/pfn/`) used when facing a jam, first in, over limpers and against a raise up to 20 BB; the big-call ICM pays a bust at its place. `DEBUG = true`, `PONDER = false`. Arena, paired against M0.1b: **+0.021 ± 0.003 payout per game** over 9,469 paired games at all table sizes against copies of M0.1b (SPRT pass; 2-player games are untouched, the gain is in 3- and 4-player games), and −0.006 ± 0.001 against the maniac/jammer/station/random field, where equilibrium jams and tight ICM calls give a little away to any-two callers and shovers. Kept as is, per the equilibrium-first stance. | this commit |
+| `m1_bundled.cpp` | the same, readable (100.0k chars, 13 over the cap: submit the minified one) | this commit |
 
 To run the pondering probe, set `PONDER = true` near the top of `bot/main.cpp` (or in the bundled
 file: `const bool PONDER = true;`) and rebuild or paste the edited bundled file; it is under the cap

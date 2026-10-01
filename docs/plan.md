@@ -179,13 +179,14 @@ and bucketed 4-way ones. It reproduces `pf.py` heads-up to the mixed hand. Grids
 3 players (twice: payouts 1/.5/0 and 1/.644/.356) and 1,296 for 4; eps (reach-weighted
 best-response gain) about 3·10⁻⁴ of the pool, so the Ganzfried-Sandholm 0.1% criterion holds with
 margin. Distilled to one class ranking per node and a threshold per grid point: EV loss 1·10⁻⁴ of
-the pool per hand, under the solver's own gap; @@CHARS@@ characters, interpolated in log-stack at
-runtime. The bot uses the chart with 3-4 alive preflop whenever the action so far is only folds
-and jams: always when facing a jam, first in when its own stack is ≤ 12 BB (the same boundary as
-heads-up; tuning by SPRT is open). What the live M0.1b games showed it had to fix: of the 84
+the pool per hand, under the solver's own gap; 16,444 characters, interpolated in log-stack at
+runtime. The bot uses the chart with 3-4 alive preflop: facing a jam; first in, over limpers and
+against a raise (a limp counts as a fold, a raise as a jam) when its own stack is ≤ 20 BB. The
+boundary was tuned in the arena: 12 BB gained nothing measurable, 20 BB did (3-player games paired
+against M0.1b: +0.014 ± 0.004 payout/game with the raise rule). What the live M0.1b games showed it had to fix: of the 84
 placement games (rank 5/194 after them), 15 ended with the bot blinded down to under 2 BB in
 3-4-player play, and it lost 0.06-0.08 BB per hand at ≤ 20 BB effective while winning 0.9 BB per
-hand above 50 BB. Arena, paired against M0.1b: @@ARENA_M1@@.
+hand above 50 BB. Arena, paired against M0.1b: **+0.021 ± 0.003 payout per game** over 9,469 paired games at all table sizes against copies of M0.1b (SPRT pass; 2-player games are untouched, the gain is in 3- and 4-player games), and −0.006 ± 0.001 against the maniac/jammer/station/random field, where equilibrium jams and tight ICM calls give a little away to any-two callers and shovers. Kept as is, per the equilibrium-first stance.
 
 ### M2: heads-up 8-30 BB equilibrium (≈2-3 weeks): the core milestone
 

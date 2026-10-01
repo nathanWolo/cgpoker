@@ -98,15 +98,18 @@ In order:
    offline by fictitious play (`solvers/pf.py`, exported by `solvers/export_pf.py`) and stored as
    bits, about 0.2k characters. 12 BB was tuned in the arena; at 25 BB it cost against calling
    stations.
-2. **3-4 players, preflop, only folds and jams so far: ICM push/fold chart.** Facing a jam, always;
-   first in, when our stack is ≤ 12 BB. The chart (`bot/pfn_tables.hpp`) comes from
+2. **3-4 players, preflop: the ICM push/fold chart.** Facing a jam, always (unless it is small next
+   to our stack with players still to act, where pot odds apply); first in, over limpers and against
+   a raise when our stack is ≤ 20 BB. A limp counts as a fold and a raise as a jam, since the chart's
+   tree has neither; short-stacked, the answer to either is jam or fold anyway. The chart (`bot/pfn_tables.hpp`) comes from
    `solvers/pfn/`, a fictitious-play solver of the exact jam/fold game of this referee (every
    non-BB posts the small blind) with ICM leaves: 6 decision nodes for 3 players, 14 for 4, solved
    on a grid of every player's stack (343 and 1,296 configurations) and distilled to one class
-   ranking per node plus a threshold per grid point, interpolated in log-stack at runtime. A limp
-   or a raise before us is off the chart's tree and falls through to the rules below. This is what
-   the live M0.1b games asked for: 15 of 84 ended with the bot blinded down below 2 BB at 3-4
-   players, and it lost chips at every depth under 20 BB.
+   ranking per node plus a threshold per grid point, interpolated in log-stack at runtime. A
+   re-raise, or a raise while we are deep, is off the tree and falls through to the rules below.
+   This is what the live M0.1b games asked for: with ≤ 12 BB and 3-4 players the bot limped 78%
+   of unopened pots and called half the raises it faced; 15 of 84 games ended with it blinded down
+   below 2 BB.
 3. **A big call (≥ 40% of our stack).**
    - *3-4 players alive*: ICM. Malmuth-Harville tournament equity with the payouts that
      CodinGame's placement-only TrueSkill implies, (1, .5, 0) and (1, .644, .356, 0), with a bust
