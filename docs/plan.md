@@ -297,8 +297,8 @@ that zoo. `bot/opp_model.hpp` measures each opponent's action frequencies and th
 the hands behind each action, shrunk toward the bot's fixed assumptions (3-4 observations' weight), and
 feeds the rules: beliefs (range widths), an expected-value bet-or-check against the opponent's fold-to-bet
 frequency, steal thresholds from fold-to-raise, and measured shove and call ranges for heads-up jam/fold
-([bot/README.md](../bot/README.md)). Arena, 2-player paired games: @@OM_TABLE@@ At all sizes:
-@@OM_MIX@@. The equilibrium pieces that won live stay (ICM push/fold at 3-4 players, jam/fold heads-up
+([bot/README.md](../bot/README.md)). Arena, 2-player paired games: +0.060 ± 0.007 against copies of M2.3 and +0.058 ± 0.007 against copies of M1 (SPRT pass; it learns a fixed-rule bot's ranges and bluffs it where it folds), and within ±0.01 of M2.3 against every zoo opponent (station −0.001, limper −0.001, big raiser −0.003, maniac +0.009, jammer −0.003, random +0.006): M2.3's rules were already tuned against those, and the model does not give any of it back. With the model switched off the bot is M2.3 again (−0.001 ± 0.006 against copies). At all sizes:
++0.035 ± 0.005 against copies of M2.3 (SPRT pass), +0.000 ± 0.002 against the zoo, +0.001 ± 0.002 against the zoo with M1 as the reference. The equilibrium pieces that won live stay (ICM push/fold at 3-4 players, jam/fold heads-up
 as the default until the opponent is measured); the solved heads-up tables stay preflop-only to 20 BB.
 
 ### M3: 3-4-player deep play (≈2 weeks)

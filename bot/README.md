@@ -60,7 +60,7 @@ Where it enters the rules:
   often and with what they call; once they have shown 3 shoving hands, call their shoves by pot odds
   against that range instead of the Nash table.
 
-Arena, 2-player paired games (+0.01 is the SPRT target): @@OM_TABLE@@
+Arena, 2-player paired games (+0.01 is the SPRT target): +0.060 ± 0.007 against copies of M2.3 and +0.058 ± 0.007 against copies of M1 (SPRT pass; it learns a fixed-rule bot's ranges and bluffs it where it folds), and within ±0.01 of M2.3 against every zoo opponent (station −0.001, limper −0.001, big raiser −0.003, maniac +0.009, jammer −0.003, random +0.006): M2.3's rules were already tuned against those, and the model does not give any of it back. With the model switched off the bot is M2.3 again (−0.001 ± 0.006 against copies). At all table sizes: +0.035 ± 0.005 against copies of M2.3 (SPRT pass), +0.000 ± 0.002 against the zoo, +0.001 ± 0.002 against the zoo with M1 as the reference.
 
 ## Policy (M2.3)
 
