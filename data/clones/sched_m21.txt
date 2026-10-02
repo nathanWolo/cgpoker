@@ -1,0 +1,84 @@
+3 kovi JuMaKre
+2 insomnia_rooster
+2 Tux4711
+2 TriK_ClaN
+3 Tux4711 kovi
+4 Tux4711 M_C fr3sh2d3atH
+4 insomnia_rooster supernakash wala
+2 kovi
+2 fr3sh2d3atH
+3 MaxFerrer Zylo
+2 kovi
+3 JuMaKre insomnia_rooster
+3 supernakash JuMaKre
+4 supernakash Tuo kozlov-ma
+4 fr3sh2d3atH JuMaKre SmogyY
+4 kozlov-ma supernakash Zylo
+4 wala fr3sh2d3atH trictrac
+3 SmogyY PetyFloyd
+4 TriK_ClaN wala TheCodeWitcher
+4 wala babaaurhum sic1
+4 AGSigma Astrobytes PetyFloyd
+4 M_C AGSigma babaaurhum
+3 Astrobytes sic1
+4 TheCodeWitcher SmilsXd Dridriun
+2 TheCodeWitcher
+3 Ichigo_E supernakash
+3 AGSigma kozlov-ma
+4 [CG]Gemini25Pro-Python dwirz Ichigo_E
+4 G-Wolf Astrobytes AGSigma
+4 OzzGnan Dridriun trictrac
+3 sic1 UnTypedScript
+4 BigUP Ichigo_E UnTypedScript
+2 Dridriun
+3 UnTypedScript AGSigma
+2 UnTypedScript
+3 TheCodeWitcher RogersMath
+4 OzzGnan dwirz SmilsXd
+2 KAKAROT_MPL
+2 hichemjadlaoui
+4 OzzGnan AGSigma Astrobytes
+4 OzzGnan Ichigo_E UnTypedScript
+4 BigUP dwirz RogersMath
+2 dwirz
+3 Astrobytes Ichigo_E
+4 Ichigo_E thekingbas OzzGnan
+4 G-Wolf BigUP hichemjadlaoui
+3 SmilsXd thekingbas
+4 Konstant OzzGnan hichemjadlaoui
+3 Dridriun hichemjadlaoui
+3 thekingbas dwirz
+3 G-Wolf Dridriun
+4 dwirz thekingbas UnTypedScript
+2 savage_floppy
+4 [CG]Gemini25Pro-Python dwirz Konstant
+4 hichemjadlaoui Astrobytes G-Wolf
+4 G-Wolf dwirz Konstant
+4 SmilsXd OzzGnan savage_floppy
+4 Dridriun BigUP AGSigma
+4 thekingbas dwirz savage_floppy
+4 BigUP Dridriun dwirz
+4 [CG]Gemini25Pro-Python savage_floppy UnTypedScript
+4 G-Wolf UnTypedScript dwirz
+4 RogersMath Astrobytes Ichigo_E
+3 thekingbas Astrobytes
+2 UnTypedScript
+3 dwirz OzzGnan
+4 OzzGnan hichemjadlaoui [CG]Gemini25Pro-Python
+4 Astrobytes Konstant Ichigo_E
+4 KAKAROT_MPL Konstant [CG]OpenAIGPTO1-Python
+2 BigUP
+3 savage_floppy Konstant
+3 thekingbas dwirz
+3 Ichigo_E savage_floppy
+3 Konstant thekingbas
+2 hichemjadlaoui
+3 deuwii [CG]CohereCommandA-Python
+4 Konstant thekingbas savage_floppy
+4 insomnia_rooster kozlov-ma supernakash
+2 M_C
+2 Astrobytes
+4 [CG]MistralCodestral-Python hichemjadlaoui deuwii
+4 Ichigo_E savage_floppy [CG]Gemini25Pro-Python
+4 trictrac SmogyY RogersMath
+3 JuMaKre fr3sh2d3atH

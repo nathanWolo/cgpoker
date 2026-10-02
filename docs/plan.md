@@ -314,6 +314,19 @@ opens 0.74-1.00 of hands and bets 0.84-0.93 when checked to, Tuo folds to raises
 A-7-2 against Waffle3z, whose 0.91 bet frequency widened the range behind a raise of our bet. The same
 widening continued in 22 of 25 such spots and those hands netted +367 BB, so it stays.
 
+**Realistic arena (2026-10-02): clones of the live field.** The arena's opponents were scripted extremes
+and copies of our own bot; it missed M2.1's live drop. `arena/clone.hpp` adds clones: per live bot (43 with at
+least 8 recorded games), a multinomial-logit policy per situation on 18 decision features, fitted to its
+recorded decisions with shrinkage toward the field model, with bet sizes drawn from its own sizes at similar
+strength and depth ([arena/README.md](../arena/README.md)). Held-out log-loss 0.320 per decision (field model
+0.751). The arena now holds frozen M1, M2.1, M2.3 and OM1 (`make arena-refs`) and replays a live run's exact
+schedule of tables (`--schedule`). Predicted against live payout: M1 0.580 vs 0.603, OM1 0.612 vs 0.622,
+M2.1 0.661 vs 0.570; our bot's decision-tag mix against the clones matches its live mix within about one
+point. M2.1's live heads-up collapse (6 of 18) is not reproduced (0.9% under the arena's estimate): bad luck,
+or within-game adaptation by live bots, which stationary clones cannot show. Against the clone field
+OM1 beats M1 by +0.04 payout on every schedule (2-player +0.05 to +0.08), where the scripted zoo had shown
++0.000; the zoo had understated the opponent model. The clone field is the arena's main yardstick from here.
+
 ### M3: 3-4-player deep play (≈2 weeks)
 
 1. **Preflop charts** for N = 3, 4 by position × facing action × stack bucket (15-150 BB), for this

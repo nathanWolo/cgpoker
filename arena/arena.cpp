@@ -2,14 +2,24 @@
 // process, multithreaded, with duplicate seeds and a paired dev-vs-prev comparison for SPRT.
 //
 //   arena [--games N] [--seed S] [--threads T] [--mix 41,34,25] [--opp station,jammer,random,prev]
-//         [--mode eval|pair] [--dup] [--ms M | --trials K] [--log FILE] [--sprt D1 [--alpha A --beta B]]
-// Opponents: prev, station, jammer (35% shove), maniac (always shoves preflop), random, folder.
+//         [--mode eval|pair] [--variants dev,m1,...] [--dup] [--ms M | --trials K] [--log FILE]
+//         [--sprt D1 [--alpha A --beta B]] [--clones data/clones/clones.txt] [--schedule FILE]
+// Opponents: prev, station, jammer (35% shove), maniac (always shoves preflop), random, folder, bigbet, limper;
+// clone:<player> (arena/clone.hpp: a live bot's fitted policy); clones (per seat, a clone drawn by how often we
+// meet that player live, distinct players at a table); and the frozen versions m1, m21, m23, om1 when
+// build/arena/frozen/ holds them (arena/freeze.py --commit ... --ns ...).
 //
 // eval: dev plays N games; each game draws its table size from --mix (4p,3p,2p) and its opponents
 //       from --opp (round robin).  --dup plays every seat rotation of the same seed and lineup.
 // pair: every game is also played with prev in dev's seat (same seed, same opponents, same
 //       rotations); the metric is the payout difference, and --sprt D1 runs a Gaussian SPRT
 //       (H0: mean 0, H1: mean D1 payout units) on the paired differences.
+// --schedule FILE: game g takes its table size and opponents from line g mod L ("n name1 name2 ...", a live
+//       run's tables from analysis/clone_fit.py schedule): each name plays as its clone, or as the field model
+//       (clone:_field) when it has none.
+// --variants a,b,c: every game is played once with each listed bot in dev's seat; each is reported, and
+//       paired against the first (pair mode is --variants dev,prev).  ARENA_CLONECHECK=1 compares each
+//       clone situation's realised action frequencies with its model's mean probabilities.
 // Payout = TrueSkill-implied placement value: (1,0), (1,.5,0), (1,.6444,.3556,0); ties share.
 // --ms gives the Monte Carlo a wall-clock budget (fidelity mode); --trials a fixed count (fast mode).
 #include <algorithm>
@@ -20,6 +30,7 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,6 +38,23 @@
 #include "../cpp/pe7c.hpp"
 #include "../bot/bot.hpp"
 #include "../bot/bot_prev.hpp"
+#if __has_include("../build/arena/frozen/m1.hpp")
+#include "../build/arena/frozen/m1.hpp"
+#define HAVE_M1 1
+#endif
+#if __has_include("../build/arena/frozen/m21.hpp")
+#include "../build/arena/frozen/m21.hpp"
+#define HAVE_M21 1
+#endif
+#if __has_include("../build/arena/frozen/m23.hpp")
+#include "../build/arena/frozen/m23.hpp"
+#define HAVE_M23 1
+#endif
+#if __has_include("../build/arena/frozen/om1.hpp")
+#include "../build/arena/frozen/om1.hpp"
+#define HAVE_OM1 1
+#endif
+#include "clone.hpp"
 
 using Clock = std::chrono::steady_clock;
 
@@ -38,7 +66,8 @@ struct Rng {
 };
 
 // ----------------------------------------------------------------------------- agents
-struct Stats { long decisions = 0; double ms_total = 0, ms_max = 0; long trials = 0; int desync = 0; long replaced = 0; std::map<std::string, long> tags; };
+struct Stats { long decisions = 0; double ms_total = 0, ms_max = 0; long trials = 0; int desync = 0; long replaced = 0; std::map<std::string, long> tags;
+               double clone_n[clones::NSIT][clones::NA] = {}, clone_p[clones::NSIT][clones::NA] = {}; };
 
 template <class T> auto note_of(const T& b, int) -> decltype(b.last_note, std::string()) { return b.last_note; }   // dev has a model note
 template <class T> std::string note_of(const T&, long) { return std::string(); }                                      // a frozen bot may not
@@ -137,9 +166,21 @@ struct Folder : pk::Agent {                  // checks when free, otherwise fold
 struct Opts {
   int games = 200, threads = 4; uint64_t seed = 1; int mix[3] = {41, 34, 25};
   std::vector<std::string> opp = {"station", "jammer", "random"};
-  bool pair = false, dup = false; double ms = 0; int trials = 20000; std::string log;
+  std::vector<std::string> variants = {"dev"};
+  bool dup = false; double ms = 0; int trials = 20000; std::string log, clones = "data/clones/clones.txt", schedule;
   double sprt_d1 = 0, alpha = 0.05, beta = 0.05;
 };
+static std::map<std::string, clones::Policy> CLONES;      // loaded once, read-only while the games run
+
+template <class T> auto set_seed0(T& b, uint64_t s, int) -> decltype(b.seed0, void()) { b.seed0 = s; }   // bots since M2.3 reseed per turn
+template <class T> void set_seed0(T&, uint64_t, long) {}
+template <class B, class Bud>
+static pk::Agent* frozen_agent(const char* label, uint64_t seed, const Opts& o, Stats* st) {
+  auto* a = new BotAgent<B, Bud>();
+  a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed; a->label = label;
+  set_seed0(a->b, seed, 0);
+  return a;
+}
 
 static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts& o, Stats* st) {
   if (name == "dev") {
@@ -156,8 +197,7 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
     return a;
   }
   if (name == "prev") {
-    auto* a = new BotAgent<prev::Bot, prev::Budget>();
-    a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed; a->label = "prev"; return a;
+    return frozen_agent<prev::Bot, prev::Budget>("prev", seed, o, st);
   }
   if (name == "station") return new Station();
   if (name == "jammer") { auto* a = new Jammer(); a->rng = Rng{seed}; a->q = 0.35; return a; }
@@ -166,6 +206,23 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
   if (name == "folder") return new Folder();
   if (name == "bigbet") { auto* a = new BigBet(); a->rng = Rng{seed}; return a; }
   if (name == "limper") return new Limper();
+  if (name.rfind("clone:", 0) == 0) {
+    auto it = CLONES.find(name.substr(6));
+    if (it == CLONES.end()) { fprintf(stderr, "no clone %s in %s\n", name.c_str(), o.clones.c_str()); exit(2); }
+    auto* a = new clones::CloneAgent(); a->pol = &it->second; a->field = &CLONES["_field"]; a->rng.x = seed; return a;
+  }
+#ifdef HAVE_M1
+  if (name == "m1") return frozen_agent<m1::Bot, m1::Budget>("m1", seed, o, st);
+#endif
+#ifdef HAVE_M21
+  if (name == "m21") return frozen_agent<m21::Bot, m21::Budget>("m21", seed, o, st);
+#endif
+#ifdef HAVE_M23
+  if (name == "m23") return frozen_agent<m23::Bot, m23::Budget>("m23", seed, o, st);
+#endif
+#ifdef HAVE_OM1
+  if (name == "om1") return frozen_agent<om1::Bot, om1::Budget>("om1", seed, o, st);
+#endif
   fprintf(stderr, "unknown agent %s\n", name.c_str()); exit(2);
 }
 
@@ -196,7 +253,10 @@ int main(int argc, char** argv) {
     else if (a == "--threads") o.threads = atoi(next().c_str());
     else if (a == "--mix") sscanf(next().c_str(), "%d,%d,%d", &o.mix[0], &o.mix[1], &o.mix[2]);
     else if (a == "--opp") { o.opp.clear(); std::string s = next(); size_t p = 0; while (p <= s.size()) { size_t q = s.find(',', p); o.opp.push_back(s.substr(p, q == std::string::npos ? std::string::npos : q - p)); if (q == std::string::npos) break; p = q + 1; } }
-    else if (a == "--mode") o.pair = next() == "pair";
+    else if (a == "--mode") { if (next() == "pair") o.variants = {"dev", "prev"}; }
+    else if (a == "--variants") { o.variants.clear(); std::string s = next(); size_t p = 0; while (p <= s.size()) { size_t q = s.find(',', p); o.variants.push_back(s.substr(p, q == std::string::npos ? std::string::npos : q - p)); if (q == std::string::npos) break; p = q + 1; } }
+    else if (a == "--clones") o.clones = next();
+    else if (a == "--schedule") o.schedule = next();
     else if (a == "--dup") o.dup = true;
     else if (a == "--ms") o.ms = atof(next().c_str());
     else if (a == "--trials") o.trials = atoi(next().c_str());
@@ -207,6 +267,20 @@ int main(int argc, char** argv) {
     else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
   }
   pe::init();
+  std::vector<std::vector<std::string>> sched;                // --schedule: per line, the opponents
+  if (!o.schedule.empty()) {
+    std::ifstream in(o.schedule); std::string line;
+    while (std::getline(in, line)) { std::istringstream is(line); int n; std::vector<std::string> v; std::string x; if (!(is >> n)) continue; while (is >> x) v.push_back(x); if ((int)v.size() == n - 1) sched.push_back(v); }
+    if (sched.empty()) { fprintf(stderr, "empty schedule %s\n", o.schedule.c_str()); return 2; }
+  }
+  bool want_clones = !sched.empty();
+  for (auto& x : o.opp) want_clones |= x == "clones" || x.rfind("clone:", 0) == 0;
+  std::vector<std::pair<std::string, double>> pool;          // clones drawn for "clones", by live-encounter weight
+  if (want_clones) {
+    CLONES = clones::load(o.clones);
+    if (!CLONES.count("_field")) { fprintf(stderr, "no clones in %s (analysis/clone_fit.py fit)\n", o.clones.c_str()); return 2; }
+    for (auto& kv : CLONES) if (kv.first != "_field" && kv.second.weight > 0) pool.push_back({kv.first, kv.second.weight});
+  }
   // base games
   Rng meta{o.seed * 0x9E3779B97F4A7C15ull + 17};
   std::vector<GameSpec> specs;
@@ -214,10 +288,23 @@ int main(int argc, char** argv) {
   for (int g = 0; g < o.games; g++) {
     int r = meta.below(o.mix[0] + o.mix[1] + o.mix[2]);
     int n = r < o.mix[0] ? 4 : r < o.mix[0] + o.mix[1] ? 3 : 2;
+    const std::vector<std::string>* row = sched.empty() ? nullptr : &sched[g % sched.size()];
+    if (row) n = (int)row->size() + 1;
     int64_t seed = (int64_t)meta.next();
     int dev_seat = meta.below(n);
     std::vector<std::string> lineup(n);
-    for (int s = 0; s < n; s++) lineup[s] = s == dev_seat ? "dev" : o.opp[opp_rr++ % o.opp.size()];
+    std::vector<std::string> drawn;                            // distinct clones at one table
+    for (int s = 0; s < n; s++) {
+      if (s == dev_seat) { lineup[s] = "dev"; continue; }
+      if (row) { const std::string& nm = (*row)[s < dev_seat ? s : s - 1]; lineup[s] = "clone:" + (CLONES.count(nm) ? nm : std::string("_field")); continue; }
+      lineup[s] = o.opp[opp_rr++ % o.opp.size()];
+      if (lineup[s] == "clones") {
+        double tot = 0; for (auto& c : pool) if (std::find(drawn.begin(), drawn.end(), c.first) == drawn.end()) tot += c.second;
+        double u = meta.uni() * tot; std::string pick;
+        for (auto& c : pool) if (std::find(drawn.begin(), drawn.end(), c.first) == drawn.end()) { pick = c.first; if ((u -= c.second) < 0) break; }
+        drawn.push_back(pick); lineup[s] = "clone:" + pick;
+      }
+    }
     int rots = o.dup ? n : 1;
     for (int rot = 0; rot < rots; rot++) {
       GameSpec sp{g, n, seed, {}, 0, rot};
@@ -230,7 +317,7 @@ int main(int argc, char** argv) {
   // work items: (spec index, variant)
   struct Item { int spec; std::string variant; };
   std::vector<Item> items;
-  for (int i = 0; i < (int)specs.size(); i++) { items.push_back({i, "dev"}); if (o.pair) items.push_back({i, "prev"}); }
+  for (int i = 0; i < (int)specs.size(); i++) for (auto& v : o.variants) items.push_back({i, v});
   std::vector<GameResult> results(items.size());
   std::vector<Stats> stats(o.threads);
   std::atomic<int> next_item{0};
@@ -242,7 +329,7 @@ int main(int argc, char** argv) {
       std::vector<pk::Agent*> agents;
       for (int s = 0; s < sp.n; s++) {
         std::string name = sp.lineup[s];
-        if (name == "dev" && items[k].variant == "prev") name = "prev";
+        if (name == "dev") name = items[k].variant;
         agents.push_back(make_agent(name, (uint64_t)sp.seed * 31 + s * 7 + 1, o, &stats[tid]));
       }
       pk::Engine eng(sp.n, sp.seed);
@@ -259,7 +346,11 @@ int main(int argc, char** argv) {
       }
       gr.pay = payouts(gr.scores);
       results[k] = gr;
-      for (auto* a : agents) delete a;
+      for (auto* a : agents) {
+        if (auto* c = dynamic_cast<clones::CloneAgent*>(a))
+          for (int si = 0; si < clones::NSIT; si++) for (int ai = 0; ai < clones::NA; ai++) stats[tid].clone_n[si][ai] += c->counts[si][ai], stats[tid].clone_p[si][ai] += c->psum[si][ai];
+        delete a;
+      }
     }
   };
   auto t0 = Clock::now();
@@ -271,10 +362,12 @@ int main(int argc, char** argv) {
   // ---- report
   std::ofstream log;
   if (!o.log.empty()) log.open(o.log);
-  double dev_pay = 0; int dev_games = 0, dev_first = 0, cancelled = 0;
-  std::map<std::string, std::pair<long, long>> ahead;      // opponent name -> (dev ahead, comparisons)
-  std::map<int, std::pair<double, int>> by_n;
-  std::map<int, double> pair_dev, pair_prev;               // spec index -> payout
+  const std::string& v0 = o.variants[0];
+  std::map<std::string, std::map<int, double>> pay_by;         // variant -> spec index -> payout
+  std::map<std::string, std::map<int, std::pair<double, int>>> by_n;
+  std::map<std::string, std::pair<double, int>> first;
+  std::map<std::string, std::pair<long, long>> ahead;          // opponent name -> (variants[0] ahead, comparisons)
+  int cancelled = 0;
   for (size_t k = 0; k < results.size(); k++) {
     const GameResult& g = results[k];
     int ds = g.spec.dev_seat;
@@ -285,43 +378,61 @@ int main(int argc, char** argv) {
       log << " pay"; for (double p : g.pay) log << " " << p;
       log << " hands " << g.hands << " rounds " << g.rounds << (g.cancelled ? " CANCELLED" : "") << "\n";
     }
-    if (g.variant == "dev") {
-      dev_pay += g.pay[ds]; dev_games++; dev_first += g.pay[ds] == 1.0; cancelled += g.cancelled;
-      by_n[g.spec.n].first += g.pay[ds]; by_n[g.spec.n].second++;
+    pay_by[g.variant][items[k].spec] = g.pay[ds];
+    by_n[g.variant][g.spec.n].first += g.pay[ds]; by_n[g.variant][g.spec.n].second++;
+    first[g.variant].first += g.pay[ds] == 1.0; first[g.variant].second++;
+    if (g.variant == v0) {
+      cancelled += g.cancelled;
       for (int s = 0; s < g.spec.n; s++) if (s != ds) {
         auto& a = ahead[g.spec.lineup[s]];
         a.second++; a.first += g.scores[ds] > g.scores[s] ? 2 : g.scores[ds] == g.scores[s] ? 1 : 0;
       }
-      pair_dev[(int)(items[k].spec)] = g.pay[ds];
-    } else pair_prev[(int)(items[k].spec)] = g.pay[ds];
+    }
   }
-  Stats st; for (auto& s : stats) { st.decisions += s.decisions; st.ms_total += s.ms_total; st.ms_max = std::max(st.ms_max, s.ms_max); st.trials += s.trials; st.desync += s.desync; st.replaced += s.replaced; for (auto& kv : s.tags) st.tags[kv.first] += kv.second; }
-  printf("arena: %d games (%zu played incl. rotations%s) in %.1fs on %d threads; %.1f games/s; bot decisions %ld, mean %.2f ms, max %.2f ms, mean trials %.0f, desyncs %d, replaced actions %ld, cancelled %d\n",
-         o.games, results.size(), o.pair ? " x2 variants" : "", secs, o.threads, results.size() / secs, st.decisions,
+  Stats st; for (auto& s : stats) { st.decisions += s.decisions; st.ms_total += s.ms_total; st.ms_max = std::max(st.ms_max, s.ms_max); st.trials += s.trials; st.desync += s.desync; st.replaced += s.replaced; for (auto& kv : s.tags) st.tags[kv.first] += kv.second;
+                                    for (int si = 0; si < clones::NSIT; si++) for (int ai = 0; ai < clones::NA; ai++) st.clone_n[si][ai] += s.clone_n[si][ai], st.clone_p[si][ai] += s.clone_p[si][ai]; }
+  printf("arena: %d games (%zu played incl. rotations x %zu variants) in %.1fs on %d threads; %.1f games/s; bot decisions %ld, mean %.2f ms, max %.2f ms, mean trials %.0f, desyncs %d, replaced actions %ld, cancelled %d\n",
+         o.games, results.size() / o.variants.size(), o.variants.size(), secs, o.threads, results.size() / secs, st.decisions,
          st.decisions ? st.ms_total / st.decisions : 0, st.ms_max, st.decisions ? (double)st.trials / st.decisions : 0, st.desync, st.replaced, cancelled);
-  if (getenv("ARENA_TAGS")) {                      // decision-tag histogram per bot (dev / prev)
+  if (getenv("ARENA_TAGS")) {                      // decision-tag histogram per bot
     std::map<std::string, long> tot; for (auto& kv : st.tags) tot[kv.first.substr(0, kv.first.find(':'))] += kv.second;
     for (auto& kv : st.tags) printf("  tag %-16s %8ld  %5.1f%%\n", kv.first.c_str(), kv.second, 100.0 * kv.second / tot[kv.first.substr(0, kv.first.find(':'))]);
   }
-  printf("dev: mean payout %.4f over %d games (first place %.1f%%)", dev_pay / dev_games, dev_games, 100.0 * dev_first / dev_games);
-  for (auto& kv : by_n) printf("; %dp %.4f (n=%d)", kv.first, kv.second.first / kv.second.second, kv.second.second);
-  printf("\n");
+  if (getenv("ARENA_CLONECHECK")) {                // implementation check: realised clone actions vs the model's probabilities
+    for (int si = 0; si < clones::NSIT; si++) {
+      double n = 0; for (int ai = 0; ai < clones::NA; ai++) n += st.clone_n[si][ai];
+      if (!n) continue;
+      printf("  clone %-11s n=%7.0f  realised/model:", clones::sit_name(si), n);
+      for (int ai = 0; ai < clones::NA; ai++) printf("  %.3f/%.3f", st.clone_n[si][ai] / n, st.clone_p[si][ai] / n);
+      printf("\n");
+    }
+  }
+  for (auto& v : o.variants) {
+    double sum = 0; int cnt = 0; for (auto& kv : pay_by[v]) sum += kv.second, cnt++;
+    printf("%s: mean payout %.4f over %d games (first place %.1f%%)", v.c_str(), sum / cnt, cnt, 100.0 * first[v].first / first[v].second);
+    for (auto& kv : by_n[v]) printf("; %dp %.4f (n=%d)", kv.first, kv.second.first / kv.second.second, kv.second.second);
+    printf("\n");
+  }
   for (auto& kv : ahead) {
     double p = 0.5 * kv.second.first / kv.second.second, se = std::sqrt(p * (1 - p) / kv.second.second);
-    printf("dev finishes ahead of %-8s %.3f +- %.3f (n=%ld)\n", kv.first.c_str(), p, se, kv.second.second);
+    printf("%s finishes ahead of %-8s %.3f +- %.3f (n=%ld)\n", v0.c_str(), kv.first.c_str(), p, se, kv.second.second);
   }
-  if (o.pair) {
-    std::vector<double> d;
-    for (auto& kv : pair_dev) if (pair_prev.count(kv.first)) d.push_back(kv.second - pair_prev[kv.first]);
-    double n = d.size(), mean = 0, var = 0;
-    for (double x : d) mean += x; mean /= n;
-    for (double x : d) var += (x - mean) * (x - mean); var /= std::max(1.0, n - 1);
-    double se = std::sqrt(var / n);
-    printf("paired dev-prev: mean payout diff %+.4f +- %.4f (n=%.0f, sd %.3f)\n", mean, se, n, std::sqrt(var));
-    if (o.sprt_d1 > 0) {
-      double d1 = o.sprt_d1, llr = var > 0 ? n * (mean * d1 - d1 * d1 / 2) / var : 0;   // Gaussian SPRT, H0 mean 0 vs H1 mean d1
-      double la = std::log(o.beta / (1 - o.alpha)), lb = std::log((1 - o.beta) / o.alpha);
-      printf("SPRT H1=%+.3f: LLR %.2f (bounds %.2f, %.2f) -> %s\n", d1, llr, la, lb, llr >= lb ? "PASS" : llr <= la ? "FAIL" : "continue");
+  for (size_t vi = 1; vi < o.variants.size(); vi++) {
+    const std::string& v1 = o.variants[vi];
+    for (int nn : {0, 2, 3, 4}) {                  // 0 = all table sizes
+      std::vector<double> d;
+      for (auto& kv : pay_by[v0]) if (pay_by[v1].count(kv.first) && (nn == 0 || specs[kv.first].n == nn)) d.push_back(kv.second - pay_by[v1][kv.first]);
+      if (d.size() < 2) continue;
+      double n = d.size(), mean = 0, var = 0;
+      for (double x : d) mean += x; mean /= n;
+      for (double x : d) var += (x - mean) * (x - mean); var /= std::max(1.0, n - 1);
+      double se = std::sqrt(var / n);
+      printf("paired %s-%s%s: mean payout diff %+.4f +- %.4f (n=%.0f, sd %.3f)\n", v0.c_str(), v1.c_str(), nn ? (" " + std::to_string(nn) + "p").c_str() : "", mean, se, n, std::sqrt(var));
+      if (nn == 0 && o.sprt_d1 > 0 && o.variants.size() == 2) {
+        double d1 = o.sprt_d1, llr = var > 0 ? n * (mean * d1 - d1 * d1 / 2) / var : 0;   // Gaussian SPRT, H0 mean 0 vs H1 mean d1
+        double la = std::log(o.beta / (1 - o.alpha)), lb = std::log((1 - o.beta) / o.alpha);
+        printf("SPRT H1=%+.3f: LLR %.2f (bounds %.2f, %.2f) -> %s\n", d1, llr, la, lb, llr >= lb ? "PASS" : llr <= la ? "FAIL" : "continue");
+      }
     }
   }
   return 0;

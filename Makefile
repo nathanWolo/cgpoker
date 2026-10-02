@@ -15,6 +15,8 @@
 #   make arena          build/arena/arena (dev + frozen prev + scripted opponents), then a 200-game smoke run
 #   make pf-tables      regenerate bot/pf_tables.hpp from solvers/pf.py (~20 s)
 #   make freeze         bot/bot_prev.hpp := bot/bot.hpp (arena/freeze.py)
+#   make arena-refs     frozen M1, M2.1, M2.3, OM1 from their commits -> build/arena/frozen/ (arena --variants)
+#   make clones         clones of the live bots: replays -> data/cache/clone_decisions.tsv -> data/clones/clones.txt
 #   make all            all of the above except eq169-check
 #   make full           all + eq169-check
 #   make clean          remove build outputs and data/cache/ (never touches committed data)
@@ -24,7 +26,7 @@ JOBS ?= 8
 CACHE := data/cache
 
 .PHONY: all full submodule pfn-tables hu-tables bot-test replayer validate validate-sim validate-java reconstruct cache preeq-check \
-        solvers-check eq169-check cpp-test engine-check bot arena pf-tables freeze clean
+        solvers-check eq169-check cpp-test engine-check bot arena arena-refs clones pf-tables freeze clean
 
 all: replayer validate reconstruct cache preeq-check solvers-check cpp-test engine-check bot-test bot arena
 full: all eq169-check
@@ -71,6 +73,17 @@ arena:
 	@mkdir -p build/arena
 	g++ -std=gnu++17 -O3 -march=native -pthread -o build/arena/arena arena/arena.cpp
 	build/arena/arena --games 200 --threads 4 --trials 5000 --opp station,jammer,random,folder
+
+arena-refs:
+	$(PYTHON) arena/freeze.py --commit 40d4864 --ns m1
+	$(PYTHON) arena/freeze.py --commit b9b662f --ns m21
+	$(PYTHON) arena/freeze.py --commit 65fca41 --ns m23
+	$(PYTHON) arena/freeze.py --commit 9187617 --ns om1
+
+clones:
+	$(PYTHON) analysis/clone_fit.py data
+	$(PYTHON) analysis/clone_fit.py fit
+	for r in m1 m21 om1; do $(PYTHON) analysis/clone_fit.py schedule tools/$${r}_games.txt > data/clones/sched_$$r.txt; done
 
 pf-tables:
 	$(PYTHON) solvers/export_pf.py

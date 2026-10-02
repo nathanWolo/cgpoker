@@ -54,6 +54,8 @@ throttling, skipping and error handling. It has not been run against the live AP
 |---|---|---|---|
 | `sel_games.txt` | 371 | Chosen from the 2,495 games in the battle lists of the top 37 agents (`data/battles/`) and fetched by the scratch `fetch_replays.sh`. The selection rule was not preserved. | `analysis/` (Java-replayer statistics) |
 | `sim_games.txt` | 120 | Fetched by the scratch `poker_research/fetch_replays.py` (top 8 agents, up to 15 recent games each, 2026-09-30) | `sim/validate_replays.py` 120/120 and the committed `data/decisions.jsonl.gz` |
-| `om1_games.txt` | 84 | OM1's placement games (our battle list, 2026-10-02) | `analysis/postmortem.py`, `retrace.py`, `om_impact.py`, `om_notes.py` |
+| `m1_games.txt` | 87 | M1's placement games (2026-10-01) | `analysis/postmortem.py`, `headsup.py`, `clone_fit.py schedule` |
+| `m21_games.txt` | 84 | M2.1's placement games (2026-10-02) | the same, and `retrace.py` |
+| `om1_games.txt` | 84 | OM1's placement games (our battle list, 2026-10-02) | `analysis/postmortem.py`, `retrace.py`, `om_impact.py`, `om_notes.py`, `clone_fit.py schedule` |
 
 The two lists share 110 games. Every id in both lists appears in `data/battles/`.

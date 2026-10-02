@@ -62,4 +62,15 @@ Key numbers (default sets):
 - **pairwise.py**: 2,495 unique finished games in 37 battle lists, 41% 4p / 34% 3p / 25% HU. p against top-42 opponents: Waffle3z 0.611 (429 pairs), kovi 0.577, BrandV 0.569, Zylo 0.562, Tuo 0.541, JuMaKre 0.553, fr3sh2d3atH 0.495, Tux4711 0.453, MaxFerrer 0.483, AGSigma 0.598. Fit over the top 8: score = 21.13 + 15.30·p, r = 0.961. Tuo finishes ahead of Waffle3z 24/43 and of kovi 11/18.
 - **leaderboard.py**: 192 bots (42 in the top league); #1 Waffle3z 30.65, #10 27.67, #30 25.12; 19 submissions created in September 2026, 10 of them on 09-25.
 
+**Our live runs and the arena clones** (`sim/poker_sim.py` reconstruction of every game):
+
+| script | what it does |
+|---|---|
+| `postmortem.py --pseudo flawedaxioms --battles B` | our games from a battle list: reproduction check, placements and payout by table size, opponents, busts, chips by depth |
+| `headsup.py`, `shortstack.py` | the heads-up phase and short-stack play of a run |
+| `retrace.py` | replays a run through a bot binary: its decision tag and model note per decision |
+| `om_notes.py`, `om_impact.py` | the opponent model's end-of-game reads; where it changed live decisions and what those hands won |
+| `tendencies.py` | per-player tendencies and how fast they show within a game |
+| `clone_fit.py data / fit / schedule` | the arena clones (`arena/README.md`): training data, fitting with held-out validation, a run's schedule |
+
 `hu_phase.py`, `regimes.py` and `pairwise.py` are the research run's one-off scripts of the same names, with the absolute paths replaced. `hu_phase.py` and `regimes.py` print byte-identical output to the originals. `pairwise.py` computes the same numbers (identical values, reformatted), and also prints the 1.96·SE interval and the other battle-list numbers quoted in `docs/research/field.md` §2 and §5. `leaderboard.py` is new.

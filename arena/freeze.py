@@ -1,38 +1,64 @@
-"""Freeze the current bot as bot/bot_prev.hpp, the arena's reference opponent ("prev").
+"""Freeze a bot version as one header with its own namespaces, so the arena can hold several versions at once.
 
-    python3 arena/freeze.py [bot.hpp to freeze]      (default: the current bot/bot.hpp)
+    python3 arena/freeze.py                                   # bot/bot.hpp -> bot/bot_prev.hpp, namespace prev
+    python3 arena/freeze.py --commit 40d4864 --ns m1          # M1 from git -> build/arena/frozen/m1.hpp
+    python3 arena/freeze.py [--commit SHA | --dir DIR] [--ns NAME] [--out PATH]
 
-The arena compiles dev (bot/bot.hpp, namespace bot) and prev (bot/bot_prev.hpp, namespace prev) into
-one binary, so the frozen copy gets its own namespaces: bot -> prev, and the jam/fold tables are
-inlined as pf_prev.  Shared headers (engine, evaluator) stay shared.  Hill-climbing loop: freeze,
-edit only bot.hpp, prove correctness, SPRT dev against prev (docs/plan.md).
+The bot's own headers (bot/*.hpp, included by name) are inlined recursively, in include order, each once, and
+their namespaces renamed: bot -> NAME, and pf / pfn_t / hu_t -> pf_NAME / pfn_t_NAME / hu_t_NAME, so the frozen
+bot keeps its own tables when dev's change.  Shared headers (engine, evaluator, ICM) stay shared: their include
+paths are rewritten relative to the output file.  --commit reads the bot/ files of that commit (git show), --dir
+a directory holding them; the default is the working tree.  Hill-climbing loop: freeze, edit only bot.hpp,
+prove correctness, SPRT dev against prev (docs/plan.md).
 """
-import os, re
+import argparse, os, re, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-BOT = os.path.join(REPO, "bot")
+RENAMED = ("pf", "pfn_t", "hu_t")
 
-import sys
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(BOT, "bot.hpp")   # e.g. a `git show <commit>:bot/bot.hpp` dump
-src = open(SRC, encoding="utf-8").read()
-pf = ""
-for name in ("pf_rank.hpp", "pf_tables.hpp"):
-    t = open(os.path.join(BOT, name), encoding="utf-8").read()
-    pf += re.sub(r"^\s*#\s*pragma\s+once\s*\n", "", t, count=1).replace("namespace pf", "namespace pf_prev")
-    src = src.replace(f'#include "{name}"\n', "")
-# the code header in namespace bot (hu_play.hpp) and the table headers (pfn_tables.hpp: pfn_t, hu_tables.hpp:
-# hu_t) are inlined with their namespaces renamed, so the frozen bot keeps its own tables when dev's change
-for name, ns in (("hu_play.hpp", None), ("pfn_tables.hpp", "pfn_t"), ("hu_tables.hpp", "hu_t")):
-    if f'#include "{name}"\n' in src:
-        t = open(os.path.join(BOT, name), encoding="utf-8").read()
-        t = re.sub(r"^\s*#\s*pragma\s+once\s*\n", "", t, count=1)
-        src = src.replace(f'#include "{name}"\n', t)
-        if ns:
-            src = src.replace(f"namespace {ns}", f"namespace {ns}_prev").replace(f"{ns}::", f"{ns}_prev::")
-src = src.replace("namespace bot", "namespace prev").replace("pf::", "pf_prev::")
-src = re.sub(r"^\s*#\s*pragma\s+once\s*\n", "", src, count=1)
-head = ("#pragma once\n// bot_prev.hpp - FROZEN copy of bot/bot.hpp made by arena/freeze.py; do not edit.\n"
-        "// Namespaces renamed (bot -> prev, pf -> pf_prev) so the arena can hold both versions.\n")
-out = os.path.join(BOT, "bot_prev.hpp")
-open(out, "w", encoding="utf-8").write(head + pf + src)
-print("wrote", os.path.relpath(out, REPO))
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--commit"); ap.add_argument("--dir"); ap.add_argument("--ns", default="prev"); ap.add_argument("--out")
+    a = ap.parse_args()
+    out = a.out or (os.path.join(REPO, "bot", "bot_prev.hpp") if a.ns == "prev" and not a.commit else
+                    os.path.join(REPO, "build", "arena", "frozen", f"{a.ns}.hpp"))
+
+    def read(name):
+        if a.commit:
+            return subprocess.check_output(["git", "-C", REPO, "show", f"{a.commit}:bot/{name}"]).decode("utf-8")
+        return open(os.path.join(a.dir or os.path.join(REPO, "bot"), name), encoding="utf-8").read()
+
+    done = set()
+    inc = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"[ \t]*$', re.M)
+    out_dir = os.path.dirname(os.path.abspath(out))
+
+    def expand(name):
+        text = re.sub(r"^\s*#\s*pragma\s+once\s*\n", "", read(name), count=1)
+        def sub(m):
+            path = m.group(1)
+            if "/" not in path:                                  # a bot/ header: inline it once
+                if path in done or path.startswith("bot_prev"): return ""
+                done.add(path)
+                return expand(path)
+            target = os.path.normpath(os.path.join(REPO, "bot", path))   # shared header: same file, new relative path
+            return f'#include "{os.path.relpath(target, out_dir)}"'
+        return inc.sub(sub, text)
+
+    done.add("bot.hpp")
+    src = expand("bot.hpp")
+    src = re.sub(r"\bnamespace bot\b", f"namespace {a.ns}", src)
+    src = re.sub(r"\bbot::", f"{a.ns}::", src)
+    for ns in RENAMED:
+        src = re.sub(rf"\bnamespace {ns}\b", f"namespace {ns}_{a.ns}", src)
+        src = re.sub(rf"\b{ns}::", f"{ns}_{a.ns}::", src)
+    what = f"commit {a.commit}" if a.commit else (a.dir or "bot/")
+    head = (f"#pragma once\n// FROZEN copy of the bot ({what}) made by arena/freeze.py; do not edit.\n"
+            f"// Namespaces renamed (bot -> {a.ns}, {', '.join(f'{x} -> {x}_{a.ns}' for x in RENAMED)}) so the arena can hold several versions.\n")
+    os.makedirs(out_dir, exist_ok=True)
+    open(out, "w", encoding="utf-8").write(head + src)
+    print("wrote", os.path.relpath(out, REPO), f"({len(done) - 1} bot headers inlined)")
+
+
+if __name__ == "__main__":
+    main()
