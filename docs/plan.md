@@ -301,6 +301,19 @@ frequency, steal thresholds from fold-to-raise, and measured shove and call rang
 +0.035 ± 0.005 against copies of M2.3 (SPRT pass), +0.000 ± 0.002 against the zoo, +0.001 ± 0.002 against the zoo with M1 as the reference. The equilibrium pieces that won live stay (ICM push/fold at 3-4 players, jam/fold heads-up
 as the default until the opponent is measured); the solved heads-up tables stay preflop-only to 20 BB.
 
+**OM1 live (2026-10-02, 84 placement games): rank 2 of 194, score 30.91**, level with #1 (BrandV, 30.91);
+M1 was rank 2 at 30.66, M2.1 rank 13 at 27.44. Mean placement payout 0.622 (2p 0.609, 3p 0.565, 4p 0.690)
+against M1's 0.603 and M2.1's 0.570; with about ±0.045 per run and different opponents per run, that is
+level with M1, not a measured gain. 2-player games 14/23 won, 0 timeouts, 0 replaced outputs; the
+submitted file replayed through `analysis/retrace.py` reproduces 6,767 of 6,779 live actions. The model
+changed the play where it was meant to (`analysis/om_impact.py`): in postflop checked-to spots it bet 896
+times where the fixed rule would have bet 544; the 323 hands with a bluff netted +113 BB, 76% of them won
+chips. Its end-of-game reads are stable for each opponent across games (`analysis/om_notes.py`): Waffle3z
+opens 0.74-1.00 of hands and bets 0.84-0.93 when checked to, Tuo folds to raises 0.69-0.81 and bets
+0.08-0.23, BrandV folds to raises 0.15-0.29. One loss looks like the model's doing: a K-high stack-off on
+A-7-2 against Waffle3z, whose 0.91 bet frequency widened the range behind a raise of our bet. The same
+widening continued in 22 of 25 such spots and those hands netted +367 BB, so it stays.
+
 ### M3: 3-4-player deep play (≈2 weeks)
 
 1. **Preflop charts** for N = 3, 4 by position × facing action × stack bucket (15-150 BB), for this
