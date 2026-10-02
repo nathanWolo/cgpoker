@@ -32,6 +32,26 @@ bundled one (`tools/bundle.py` checks compilation; the output comparison was don
 `tools/cg_minify.py` is crossfish's minifier plus `--keep NAMES` (identifiers it must not rename:
 nested `std::chrono` names) and a few more std member names (`rfind`, `compare`, `what`, ...).
 
+## Policy (M3.0: heads-up short-stack shoves from the field's tendencies)
+
+Measured in the clone arena (`arena/README.md`). Handing one regime at a time to a top live bot's clone
+(`hyb:` agents) showed OM1 ahead of Waffle3z's and BrandV's policies everywhere except heads-up preflop at
+<= 20 BB, where BrandV's play gained 0.0066 +- 0.0027 payout: the live field folds to heads-up shoves far more
+than equilibrium (it calls 22-30% at <= 15 BB, the equilibrium about 37-60%), with near-average hands when it
+does call, and OM1 used its measured shove rule only after an opponent had faced three shoves.
+
+- Small blind first in, <= 12 BB: jam by expected value from the first hand, against the opponent model's
+  fold-to-shove frequency and calling range, whose priors are now the field's (calls 25%, hands spread over
+  the top 70%) instead of the equilibrium chart's.
+- Big blind over a limp, or facing a raise short of all-in, <= 12 BB: shove when its expected value (the same
+  fold and calling estimates) beats checking or the better of calling and folding (equity against their
+  limping / raising range times the pot).
+
+Arena, fresh games (5,000, all rotations, against the clone field): +0.0030 +- 0.0012 payout against OM1
+(2-player +0.0095 +- 0.0055); the small blind rule alone +0.0022 +- 0.0010. Not taken, measured flat: wider
+opens, isolation raises and 3-bets in deep 3-4 player pots (all within +-0.008), multiway fold equity as the
+product of the opponents' fold rates (+0.0001 +- 0.0021), the big blind rule to 20 BB (-0.0035 +- 0.0014).
+
 ## Policy (OM1: real-time opponent modelling)
 
 Why: the equilibrium tables lost to passive bots and the fixed rules cannot be right against a field

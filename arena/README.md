@@ -23,6 +23,9 @@ build/arena/arena --games 2016 --dup --trials 5000 --schedule data/clones/sched_
 | `--clones FILE` | the fitted clones (default `data/clones/clones.txt`) |
 | `ARENA_CLONECHECK=1` (env) | per situation, the clones' realised action frequencies next to their models' mean probabilities |
 | `ARENA_TAGS=1` (env) | decision-tag histogram of each bot version |
+| `ARENA_HANDLOG=path` (env) | per-hand ledger of the seat under test: players alive, depth, position, what happened before its first preflop action, that action, how the hand went, net big blinds (`analysis/arena_hands.py` aggregates it by regime) |
+| variant `dev/key=value/...` | the dev bot with parameters changed (`open`, `iso`, `iso_bb`, `iso_limper`, `3bet`, `mwfold`, `om`, `hu_call`, `hu_callw`, `hu_gate`, `jf`, `evjam`, `evjam_m`): a parameter sweep in one run, on identical games |
+| variant `hyb:<player>:<regime>` | the dev bot except in one regime, where that player's clone decides: `pre3s`/`pre3d` (preflop, 3-4 alive, <= / > 20 BB), `post3`, the same with `2` for heads-up, optionally narrowed to a clone situation (`pre2s.open`, `pre2s.bbopt`, `pre2s.vsraise`, `pre2s.vsjam`). A causal test of where a policy gives away payout |
 | `--sprt D1` | Gaussian SPRT on the paired differences, H0 mean 0 vs H1 mean D1 payout units, α = β = 0.05 (bounds ±2.94) |
 | `--trials K` / `--ms M` | fast mode (fixed Monte Carlo trials) / fidelity mode (wall-clock budget) |
 | `--log FILE` | one line per game: variant, seed, lineup, scores, payouts |
@@ -84,3 +87,9 @@ Validation (2026-10-02, 43 players with at least 8 recorded games):
   stationary, while some live bots may adapt to an opponent within a game.
 
 The clones are the arena's realistic opponents; the scripted ones remain as extreme cases.
+
+**Seeds (fixed 2026-10-02).** The game generator was seeded with seed x its own increment, so seed S + 1 replayed
+seed S's stream shifted by one draw: runs with seeds 71 and 72 shared 393 of their first 400 games, 61 and 71
+shared 398. Each run's paired comparison was valid, but a "confirmation on another seed" was largely the same
+games. The seed now enters with a different multiplier (seeds 1 and 2 share none of 400 games); results before
+the fix are reproducible only with the old binary.

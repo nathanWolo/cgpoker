@@ -129,6 +129,21 @@ class Bot {
   double hu_shove_bb = 1e9;               // facing a preflop all-in deeper than this (BB): the rules (uniform belief) decide, not the tables
   double hu_max_bb = 20;                  // heads-up: the solved strategy (hu_play.hpp) up to this effective stack (BB); 150 lost to M1 against the exploitative field, 20 is neutral
   double pfn_max_bb = 20;                 // 3-4 players, preflop: the ICM push/fold chart decides first-in, over limps and against a raise up to this stack (BB); 20 beat 12 in the arena
+  // M3, 3-4 players alive, preflop off the chart: thresholds on our equity against the live opponents' ranges
+  double p_open = 0.50, p_open_step = 0.03;   // raise first in if equity > p_open + p_open_step per extra opponent
+  double p_iso = 0.50;                        // the same over limpers
+  double p_iso_bb = 2.5, p_iso_limper = 0;    // raise-to over limpers: p_iso_bb + p_iso_limper per limper (BB)
+  double p_3bet = 0.75;                       // re-raise (pot-sized) facing a raise
+  bool mw_fold_all = false;                   // postflop bet rule, several opponents: fold equity = all of them fold (true) or the likeliest folder (false)
+  // heads-up jam/fold, small blind first in: jam by expected value against how often and with what the opponent calls,
+  // once they have faced hu_jam_gate jams; before that the equilibrium chart.  The priors of the measured rule: the
+  // share of hands an unmeasured opponent calls with (-1: the equilibrium calling range) and the width of those hands
+  // M3: from the first hand, with the field's priors (unmeasured opponents call a heads-up shove 25% of the time, with
+  // hands spread over the top 70%; the live field over-folds to shoves), +0.0022 +- 0.0010 payout against the clones
+  double hu_call_prior = 0.25, hu_callw_prior = 0.7; int hu_jam_gate = 0;
+  // heads-up up to hu_evjam_bb (0: off): the big blind's option over a limp, and facing a raise short of all-in, shove
+  // when that beats checking or the better of calling and folding by hu_evjam_margin pots (expected values below)
+  double hu_evjam_bb = 12, hu_evjam_margin = 0;    // M3: on to 12 BB, +0.0008 more (20 BB lost on fresh games)
 
   // table-free value of the best 5 of k (5..7) cards
   static uint32_t slow_partial(const int* c, int k) {
@@ -406,9 +421,10 @@ class Bot {
       const pk::Player* opp = nullptr;
       for (auto& p : tr.players) if (p.id != tr.me && !p.folded) opp = &p;
       if (tr.last_raiser == -1 && tr.me == tr.sb_id && (can_raise || can_allin)) {
-        if (use_om && opp && om.o[opp->id].vsjam.n >= 3) {   // measured: jam if +EV against how often and with what they call
+        if (use_om && opp && om.o[opp->id].vsjam.n >= hu_jam_gate) {   // measured: jam if +EV against how often and with what they call
           int kc = 0; for (int i = 0; i < 169; i++) kc += (pf::PF_CALL[i] >> k & 1) * ((i / 13 == i % 13) ? 6 : (i / 13 > i % 13) ? 4 : 12);
-          double nash_call = kc / 1326.0, c = 1 - om.fold_to_jam(opp->id, 1 - nash_call), wc = om.calljam_width(opp->id, nash_call);
+          double nash_call = kc / 1326.0, pc = hu_call_prior >= 0 ? hu_call_prior : nash_call, pw = hu_callw_prior >= 0 ? hu_callw_prior : pc;
+          double c = 1 - om.fold_to_jam(opp->id, 1 - pc), wc = om.calljam_width(opp->id, pw);
           static thread_local int rc[1326][2]; int kk = top_range(hole, board, 0, wc, rc);
           double ec = equity_vs_range(hole, board, 0, 1, rc, kk, b, t0);
           double ev = (1 - c) * 1.5 + c * (ec * (eff_bb + 0.5) - (1 - ec) * (eff_bb - 0.5));   // BB, relative to folding
@@ -421,6 +437,28 @@ class Bot {
       if (tr.me == tr.bb_id && opp && opp->allin && call > 0 && !(use_om && om.o[opp->id].jam_pct.n >= 3)) {   // measured: the pot-odds rule against their shown jam range
         last_tag = "pf-bb"; last_equity = -1; last_trials = 0;
         return (pf::PF_CALL[cls] >> k & 1) ? call_s() : "FOLD";
+      }
+    }
+
+    // ---- heads-up, short, the big blind over a limp or anyone facing a raise short of all-in: shove if its expected
+    // value (chips) beats the alternative.  Shove: they fold with the opponent model's fold-to-shove frequency (prior:
+    // the field's), else we hold our equity against their calling range.  Check / call: our equity against their
+    // limping / raising range times the pot, as if fully realised.
+    if (hu_evjam_bb > 0 && use_om && preflop && alive == 2 && live == 2 && eff_bb <= hu_evjam_bb && (can_allin || can_raise)
+        && !(tr.last_raiser == -1 && tr.me == tr.sb_id)) {
+      const pk::Player* opp = nullptr;
+      for (auto& p : tr.players) if (p.id != tr.me && !p.folded) opp = &p;
+      if (opp && !opp->allin && opp->stack > 0) {
+        double pc = hu_call_prior >= 0 ? hu_call_prior : 0.3, pw = hu_callw_prior >= 0 ? hu_callw_prior : pc;
+        double F = om.fold_to_jam(opp->id, 1 - pc), wc = om.calljam_width(opp->id, pw);
+        static thread_local int rj[1326][2], ro[1326][2];
+        int kj = top_range(hole, board, 0, wc, rj); double ec = equity_vs_range(hole, board, 0, 1, rj, kj, b, t0);
+        double wo = call > 0 ? om.open_width(opp->id, 0.6) : om.limp_width(opp->id, 0.8);
+        int ko = top_range(hole, board, 0, wo, ro); double eo = equity_vs_range(hole, board, 0, 1, ro, ko, b, t0);
+        double E = eff, P = pot;
+        double ev_jam = F * P + (1 - F) * (ec * 2 * E - (E - me.total));
+        double ev_alt = std::max(0.0, eo * (P + call) - call);
+        if (ev_jam > ev_alt + hu_evjam_margin * P) { last_tag = "hu-evjam"; last_equity = ec; last_trials = 0; return can_allin ? "ALL-IN" : bet(stack); }
       }
     }
 
@@ -579,17 +617,21 @@ class Bot {
         return e > odds + m ? call_s() : "FOLD";
       }
       if (preflop && tr.last_raiser == -1) {              // unopened pot, we are not the BB: open or complete
-        double thr = 0.50 + 0.03 * (n_opp - 1);
+        int limpers = 0;
+        for (auto& p : tr.players) if (p.id != tr.me && p.id != tr.bb_id && !p.folded && p.rnd >= bb) limpers++;
+        bool multi = alive >= 3;
+        double thr = (multi ? (limpers ? p_iso : p_open) + p_open_step * (n_opp - 1) : 0.50 + 0.03 * (n_opp - 1));
         if (use_om) {                                     // steal more from opponents who fold to raises, less from those who never do
           double f = 0; int nf = 0;
           for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) { f += om.fold_to_raise(p.id); nf++; }
           if (nf) thr = std::max(0.40, thr - 0.25 * std::max(0.0, f / nf - 0.5));   // never above the value threshold: a station is raised for value
         }
-        if (e > thr && can_raise) { last_tag = "open"; return bet((int)(2.5 * bb) - me.rnd); }
+        double to = multi && limpers ? (p_iso_bb + p_iso_limper * limpers) * bb : 2.5 * bb;
+        if (e > thr && can_raise) { last_tag = limpers ? "iso" : "open"; return bet((int)to - me.rnd); }
         last_tag = "complete";
         return e > odds + 0.03 ? "CALL" : "FOLD";
       }
-      if (e > 0.75 && can_raise) { last_tag = "raise"; return bet(pot + call); }
+      if (e > (preflop && alive >= 3 ? p_3bet : 0.75) && can_raise) { last_tag = "raise"; return bet(pot + call); }
       last_tag = "call";
       return e > odds + 0.02 ? call_s() : "FOLD";
     }
@@ -598,7 +640,7 @@ class Bot {
     // and no bluffs; a folder gets bluffs).  Without it: value-bet thinner (a checking opponent is weak).
     if (use_om && !preflop && can_raise) {
       double f = 1; int nf = 0;
-      for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) { f = std::min(f, om.fold_to_bet(p.id)); nf++; }
+      for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) { f = mw_fold_all ? f * om.fold_to_bet(p.id) : std::min(f, om.fold_to_bet(p.id)); nf++; }
       if (nf) {
         double P = pot, B = std::max((double)bb, 0.6 * pot); if (B >= stack) B = stack;
         double frac_c = std::max(0.05, frac * (1 - f)), ec = e;

@@ -17,6 +17,7 @@
 // --schedule FILE: game g takes its table size and opponents from line g mod L ("n name1 name2 ...", a live
 //       run's tables from analysis/clone_fit.py schedule): each name plays as its clone, or as the field model
 //       (clone:_field) when it has none.
+// ARENA_HANDLOG=path: a per-hand ledger of the seat under test (regime, context, action, net big blinds).
 // --variants a,b,c: every game is played once with each listed bot in dev's seat; each is reported, and
 //       paired against the first (pair mode is --variants dev,prev).  ARENA_CLONECHECK=1 compares each
 //       clone situation's realised action frequencies with its model's mean probabilities.
@@ -73,7 +74,7 @@ template <class T> auto note_of(const T& b, int) -> decltype(b.last_note, std::s
 template <class T> std::string note_of(const T&, long) { return std::string(); }                                      // a frozen bot may not
 template <class B, class Bud>
 struct BotAgent : pk::Agent {
-  B b; Bud budget; Stats* st; bool trace = false; const char* label = "dev";
+  B b; Bud budget; Stats* st; bool trace = false; std::string label = "dev";
   bool act(const pk::Obs& o, std::string& out) override {
     auto t0 = Clock::now();
     out = b.act(o, budget, t0);
@@ -81,7 +82,7 @@ struct BotAgent : pk::Agent {
     if (trace) fprintf(stderr, "r%d h%d bb%d %s %s pot %d call %d stack %d eq %.3f %s -> %s\n", o.round, o.hand_nb, b.tr.bb, o.cards.c_str(), o.board.c_str(),
                        b.tr.pot, b.tr.call_amount(b.tr.players[b.tr.me]), o.stacks[o.player_id], b.last_equity, b.last_tag.c_str(), out.c_str());
     if (trace) { std::string nt = note_of(b, 0); if (!nt.empty()) fprintf(stderr, "    %s\n", nt.c_str()); }
-    st->tags[std::string(label) + ":" + b.last_tag]++;
+    st->tags[label + ":" + b.last_tag]++;
     st->decisions++; st->ms_total += ms; st->ms_max = std::max(st->ms_max, ms); st->trials += b.last_trials; st->desync += b.tr.desynced;
     return true;
   }
@@ -182,7 +183,61 @@ static pk::Agent* frozen_agent(const char* label, uint64_t seed, const Opts& o, 
   return a;
 }
 
+// hyb:<player>:<regime>[+<regime>...]: the dev bot, except in the named regimes, where that player's clone decides
+// (a causal test of where a policy gains: both see every decision, so both trackers stay in sync).  Regimes:
+// pre3s / pre3d (preflop, 3-4 alive, effective stack <= / > 20 BB), post3 (postflop, 3-4 alive), and the same
+// with 2 for heads-up; a regime with a clone situation appended (pre2s.open, pre2s.vsraise, ...) narrows it.
+struct Hybrid : pk::Agent {
+  pk::Agent* dev = nullptr; clones::CloneAgent* cl = nullptr; std::vector<std::string> regimes; long used = 0, total = 0;
+  bot::Bot* b = nullptr;
+  ~Hybrid() { delete dev; delete cl; }
+  bool act(const pk::Obs& o, std::string& out) override {
+    std::string a, c;
+    dev->act(o, a); cl->act(o, c);
+    const pk::Tracker& t = b->tr;
+    int alive = 0, opp = 0; for (auto& p : t.players) if (p.stack + p.total > 0) { alive++; if (p.id != t.me && !p.folded) opp = std::max(opp, p.stack + p.total); }
+    double eff = std::min(t.players[t.me].stack + t.players[t.me].total, opp) / (double)t.bb;
+    std::string r = std::string(t.board.empty() ? "pre" : "post") + (alive >= 3 ? "3" : "2") + (t.board.empty() ? (eff <= 20 ? "s" : "d") : "");
+    std::string r2 = r + "." + clones::sit_name(clones::features(cl->tr).sit);      // e.g. pre2s.open, pre2s.vsraise
+    bool use = std::find(regimes.begin(), regimes.end(), r) != regimes.end() || std::find(regimes.begin(), regimes.end(), r2) != regimes.end();
+    total++; used += use;
+    out = use ? c : a;
+    return true;
+  }
+};
+
+// dev/key=value/...: the dev bot with parameters changed (the M3 preflop thresholds and switches)
+static void set_param(bot::Bot& b, const std::string& k, double v) {
+  if (k == "open") b.p_open = v; else if (k == "open_step") b.p_open_step = v; else if (k == "iso") b.p_iso = v;
+  else if (k == "iso_bb") b.p_iso_bb = v; else if (k == "iso_limper") b.p_iso_limper = v; else if (k == "3bet") b.p_3bet = v;
+  else if (k == "mwfold") b.mw_fold_all = v != 0; else if (k == "om") b.use_om = v != 0;
+  else if (k == "hu_call") b.hu_call_prior = v; else if (k == "hu_callw") b.hu_callw_prior = v; else if (k == "hu_gate") b.hu_jam_gate = (int)v;
+  else if (k == "jf") b.jamfold_max_bb = v; else if (k == "evjam") b.hu_evjam_bb = v; else if (k == "evjam_m") b.hu_evjam_margin = v;
+  else { fprintf(stderr, "unknown dev parameter %s\n", k.c_str()); exit(2); }
+}
 static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts& o, Stats* st) {
+  if (name.rfind("hyb:", 0) == 0) {
+    size_t c2 = name.find(':', 4);
+    auto* h = new Hybrid();
+    h->dev = make_agent("dev", seed, o, st);
+    h->b = &static_cast<BotAgent<bot::Bot, bot::Budget>*>(h->dev)->b;
+    h->cl = static_cast<clones::CloneAgent*>(make_agent("clone:" + name.substr(4, c2 - 4), seed ^ 0x5bd1e995, o, st));
+    std::string rs = name.substr(c2 + 1); size_t p = 0;
+    while (p <= rs.size()) { size_t q = rs.find('+', p); h->regimes.push_back(rs.substr(p, q == std::string::npos ? std::string::npos : q - p)); if (q == std::string::npos) break; p = q + 1; }
+    return h;
+  }
+  if (name.rfind("dev/", 0) == 0) {
+    auto* a = static_cast<BotAgent<bot::Bot, bot::Budget>*>(make_agent("dev", seed, o, st));
+    a->label = name;
+    size_t p = 4;
+    while (p < name.size()) {
+      size_t q = name.find('/', p); std::string kv = name.substr(p, q == std::string::npos ? std::string::npos : q - p);
+      size_t eq = kv.find('='); if (eq == std::string::npos) { fprintf(stderr, "bad parameter %s\n", kv.c_str()); exit(2); }
+      set_param(a->b, kv.substr(0, eq), atof(kv.c_str() + eq + 1));
+      if (q == std::string::npos) break; p = q + 1;
+    }
+    return a;
+  }
   if (name == "dev") {
     auto* a = new BotAgent<bot::Bot, bot::Budget>();
     a->budget.ms = o.ms; a->budget.max_trials = o.trials; a->budget.min_trials = o.ms > 0 ? 2000 : o.trials; a->st = st; a->b.rng.x = seed; a->b.seed0 = seed;
@@ -241,7 +296,44 @@ static std::vector<double> payouts(const std::vector<int>& scores) {
 }
 
 struct GameSpec { int idx; int n; int64_t seed; std::vector<std::string> lineup; int dev_seat; int rotation; };
-struct GameResult { GameSpec spec; std::vector<int> scores; std::vector<double> pay; int hands, rounds; bool cancelled; std::string variant; };
+struct GameResult { GameSpec spec; std::vector<int> scores; std::vector<double> pay; int hands, rounds; bool cancelled; std::string variant; std::string ledger; };
+
+// Per-hand ledger of one seat (ARENA_HANDLOG): the regime at hand start, what happened before the seat's first
+// preflop action, that action, how the hand went for it, and its net chips in big blinds.  One TSV line per hand:
+// variant game rot n hand alive eff_bb pos context first outcome n_flop net_bb
+static int street_of(const std::string& board) { int k = 0; size_t i = 0; while (i < board.size()) { size_t j = board.find('_', i); if (board.compare(i, (j == std::string::npos ? board.size() : j) - i, "X") != 0) k++; if (j == std::string::npos) break; i = j + 1; } return k; }
+static std::string hand_ledger(const pk::Engine& eng, int seat, const std::vector<int>& final_stacks, const std::string& variant, int game, int rot) {
+  std::string out;
+  std::map<int, std::vector<const pk::LogEntry*>> by_hand;
+  for (auto& e : eng.log) by_hand[e.hand].push_back(&e);
+  const auto& hs = eng.hand_starts;
+  for (size_t i = 0; i < hs.size(); i++) {
+    const auto& h = hs[i];
+    int n = (int)h.chips.size(), mine = h.chips[seat];
+    if (mine <= 0) continue;
+    int next = i + 1 < hs.size() ? hs[i + 1].chips[seat] : final_stacks[seat];
+    int alive = 0, opp_max = 0;
+    for (int s = 0; s < n; s++) if (h.chips[s] > 0) { alive++; if (s != seat) opp_max = std::max(opp_max, h.chips[s]); }
+    double eff = std::min(mine, opp_max) / (double)h.bb;
+    const char* pos = seat == h.bb_id ? "BB" : seat == h.sb_id ? "SB" : seat == h.dealer_id ? "BTN" : "UTG";
+    std::string ctx = "unopened", first = "-";
+    int folded_pre = 0; bool i_folded_pre = false, acted = false;
+    for (auto* e : by_hand[h.hand]) {
+      int street = street_of(eng.round_infos[e->turn].board);
+      if (street != 0) continue;
+      std::string a = e->shown.substr(0, e->shown.find('_'));
+      if (a == "FOLD") { folded_pre++; if (e->pid == seat) i_folded_pre = true; }
+      if (e->pid == seat) { if (!acted) first = a, acted = true; continue; }
+      if (!acted) { if (a == "BET" || a == "ALL-IN") ctx = "raised"; else if (a == "CALL" && ctx == "unopened") ctx = "limped"; }
+    }
+    const char* outcome = i_folded_pre ? "fold-pre" : folded_pre >= alive - 1 ? "won-pre" : "flop";
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%s\t%s\t%s\t%s\t%d\t%.2f\n", variant.c_str(), game, rot, n, h.hand, alive, eff, pos,
+             ctx.c_str(), first.c_str(), outcome, alive - folded_pre, (next - mine) / (double)h.bb);
+    out += buf;
+  }
+  return out;
+}
 
 int main(int argc, char** argv) {
   Opts o;
@@ -275,6 +367,7 @@ int main(int argc, char** argv) {
   }
   bool want_clones = !sched.empty();
   for (auto& x : o.opp) want_clones |= x == "clones" || x.rfind("clone:", 0) == 0;
+  for (auto& x : o.variants) want_clones |= x.rfind("clone:", 0) == 0 || x.rfind("hyb:", 0) == 0;
   std::vector<std::pair<std::string, double>> pool;          // clones drawn for "clones", by live-encounter weight
   if (want_clones) {
     CLONES = clones::load(o.clones);
@@ -282,7 +375,10 @@ int main(int argc, char** argv) {
     for (auto& kv : CLONES) if (kv.first != "_field" && kv.second.weight > 0) pool.push_back({kv.first, kv.second.weight});
   }
   // base games
-  Rng meta{o.seed * 0x9E3779B97F4A7C15ull + 17};
+  // the game generator's stream: seed times a constant that is not the generator's own increment (with the increment,
+  // seed S + 1 was seed S's stream shifted by one draw, and nearby seeds replayed mostly the same games)
+  Rng meta{o.seed * 0xD1B54A32D192ED03ull + 0x632BE59BD9B4E019ull};
+  meta.next(); meta.next();
   std::vector<GameSpec> specs;
   int opp_rr = 0;
   for (int g = 0; g < o.games; g++) {
@@ -337,6 +433,7 @@ int main(int argc, char** argv) {
       try {
         auto r = eng.run(agents);
         gr.scores = r.scores; gr.hands = r.hands; gr.rounds = r.rounds; gr.cancelled = r.cancelled;
+        if (getenv("ARENA_HANDLOG")) gr.ledger = hand_ledger(eng, sp.dev_seat, r.stacks, items[k].variant, sp.idx, sp.rotation);
         stats[tid].replaced += eng.replaced[sp.dev_seat];
         if (eng.replaced[sp.dev_seat] && getenv("ARENA_DEBUG"))
           for (auto& l : eng.replaced_log) if (atoi(l.c_str()) == sp.dev_seat) fprintf(stderr, "replaced %s\n", l.c_str());
@@ -388,6 +485,11 @@ int main(int argc, char** argv) {
         a.second++; a.first += g.scores[ds] > g.scores[s] ? 2 : g.scores[ds] == g.scores[s] ? 1 : 0;
       }
     }
+  }
+  if (const char* hl = getenv("ARENA_HANDLOG")) {
+    std::ofstream f(hl);
+    f << "variant\tgame\trot\tn\thand\talive\teff_bb\tpos\tcontext\tfirst\toutcome\tn_flop\tnet_bb\n";
+    for (auto& g : results) f << g.ledger;
   }
   Stats st; for (auto& s : stats) { st.decisions += s.decisions; st.ms_total += s.ms_total; st.ms_max = std::max(st.ms_max, s.ms_max); st.trials += s.trials; st.desync += s.desync; st.replaced += s.replaced; for (auto& kv : s.tags) st.tags[kv.first] += kv.second;
                                     for (int si = 0; si < clones::NSIT; si++) for (int ai = 0; ai < clones::NA; ai++) st.clone_n[si][ai] += s.clone_n[si][ai], st.clone_p[si][ai] += s.clone_p[si][ai]; }

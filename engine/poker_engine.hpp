@@ -516,6 +516,15 @@ class Engine : public Board {
   std::vector<LogEntry> log;
   std::vector<int> replaced;                         // per seat: outputs the referee replaced (illegal or unparseable)
   std::vector<std::string> replaced_log;             // the first few, "seat: raw -> shown" (debugging)
+  // per hand (index = hand number - 1): positions, big blind and each seat's chips (stack + blinds posted) at the
+  // start; for per-hand accounting in the arena, no effect on play
+  struct HandStart { int hand, bb, bb_id, sb_id, dealer_id; std::vector<int> chips; };
+  std::vector<HandStart> hand_starts;
+  void note_hand_start() {
+    HandStart h{hand_nb, bb, bb_id, sb_id, dealer_id, {}};
+    for (auto& p : players) h.chips.push_back(p.stack + p.total);
+    hand_starts.push_back(h);
+  }
 
   Engine(int n_, int64_t seed) : rng(seed) {
     if (n_ < 2 || n_ > 4) throw std::invalid_argument("n must be 2..4");
@@ -527,7 +536,7 @@ class Engine : public Board {
     last_sent_hand.assign(n, 0);
     replaced.assign(n, 0);
     // Referee.init
-    reset_hand(); init_deck(); init_blind(); calculate_next_player();
+    reset_hand(); init_deck(); init_blind(); note_hand_start(); calculate_next_player();
   }
   void init_deck() {
     deck.resize(52);
@@ -579,7 +588,7 @@ class Engine : public Board {
   void game_turn(int t, std::vector<Agent*>& agents) {
     if (calculate_player_winnings()) return do_board_over();
     if (over || t == 1) {                              // initBoard
-      if (t != 1) { reset_hand(); init_deck(); init_blind(); calculate_next_player(); }
+      if (t != 1) { reset_hand(); init_deck(); init_blind(); note_hand_start(); calculate_next_player(); }
       deal_first();
       calc_next = false;
       return;

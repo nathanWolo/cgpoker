@@ -339,6 +339,21 @@ OM1 beats M1 by +0.04 payout on every schedule (2-player +0.05 to +0.08), where 
 
 **Gates:** SPRT against M2; submit.
 
+**M3 status (2026-10-02): the clone arena redirected it.** Before building charts, the regimes were measured
+against the live field's clones. A per-hand ledger (`ARENA_HANDLOG`, `analysis/arena_hands.py`) showed OM1 limping
+a quarter of its deep 3-4 player hands, profitably (+1.0 to +1.7 BB per limped hand that sees a flop), while
+Waffle3z's clone raises instead and 3-bets far more. But payout, not chips, decides: a sweep of the deep 3-4 player
+preflop thresholds (opens, isolation raises over limpers, 3-bets; `dev/key=value` variants on identical games) was
+flat within +-0.008, and handing one regime at a time to a top bot's clone (`hyb:` agents) found OM1 ahead of both
+Waffle3z's and BrandV's policies in every deep regime, preflop and postflop, at 3-4 players (giving deep preflop to
+either clone cost 0.02 payout). The one leak was heads-up preflop at <= 20 BB (BrandV's play +0.0066 +- 0.0027):
+the field over-folds to heads-up shoves, and OM1 waited for three observations before using its measured shove rule.
+**M3.0** shoves by expected value from the first hand with the field's priors, and also over a limp or a small
+raise up to 12 BB: +0.0030 +- 0.0012 payout against OM1 on fresh games ([bot/README.md](../bot/README.md)).
+The deep 3-4 player charts of item 1 are shelved until the arena shows a leak there. Also found: the arena's seeds
+overlapped (nearby seeds replayed mostly the same games), so earlier "confirmations on another seed" were not
+independent; fixed ([arena/README.md](../arena/README.md)).
+
 ### M4: the self-play network, the Ataraxos route (≈4-7 weeks plus compute; optional)
 
 Purpose: replace the hand-built parts that are furthest from equilibrium, most likely deep 3-4p
