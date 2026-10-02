@@ -40,6 +40,8 @@ struct Rng {
 // ----------------------------------------------------------------------------- agents
 struct Stats { long decisions = 0; double ms_total = 0, ms_max = 0; long trials = 0; int desync = 0; long replaced = 0; std::map<std::string, long> tags; };
 
+template <class T> auto note_of(const T& b, int) -> decltype(b.last_note, std::string()) { return b.last_note; }   // dev has a model note
+template <class T> std::string note_of(const T&, long) { return std::string(); }                                      // a frozen bot may not
 template <class B, class Bud>
 struct BotAgent : pk::Agent {
   B b; Bud budget; Stats* st; bool trace = false; const char* label = "dev";
@@ -49,6 +51,7 @@ struct BotAgent : pk::Agent {
     double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
     if (trace) fprintf(stderr, "r%d h%d bb%d %s %s pot %d call %d stack %d eq %.3f %s -> %s\n", o.round, o.hand_nb, b.tr.bb, o.cards.c_str(), o.board.c_str(),
                        b.tr.pot, b.tr.call_amount(b.tr.players[b.tr.me]), o.stacks[o.player_id], b.last_equity, b.last_tag.c_str(), out.c_str());
+    if (trace) { std::string nt = note_of(b, 0); if (!nt.empty()) fprintf(stderr, "    %s\n", nt.c_str()); }
     st->tags[std::string(label) + ":" + b.last_tag]++;
     st->decisions++; st->ms_total += ms; st->ms_max = std::max(st->ms_max, ms); st->trials += b.last_trials; st->desync += b.tr.desynced;
     return true;
@@ -148,6 +151,7 @@ static pk::Agent* make_agent(const std::string& name, uint64_t seed, const Opts&
     if (getenv("BOT_PFN")) a->b.pfn_max_bb = atof(getenv("BOT_PFN"));
     if (getenv("BOT_HU")) a->b.hu_max_bb = atof(getenv("BOT_HU"));
     if (getenv("BOT_HUPOST")) a->b.hu_postflop = atoi(getenv("BOT_HUPOST")) != 0;
+    if (getenv("BOT_OM")) a->b.use_om = atoi(getenv("BOT_OM")) != 0;
     if (getenv("BOT_HUSHOVE")) a->b.hu_shove_bb = atof(getenv("BOT_HUSHOVE"));
     return a;
   }

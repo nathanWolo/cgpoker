@@ -8,7 +8,8 @@
 | `pf_rank.hpp` | Preflop class strength percentiles (combo-weighted equity against a random hand, from `solvers/eq169.bin`). |
 | `pfn_tables.hpp` | ICM push/fold charts for 3-4 players (`solvers/pfn/distil.py`): a class ranking per node and a threshold per stack-grid point, CJK14-packed. |
 | `hu_tables.hpp` | Heads-up 8-120 BB strategy from `solvers/hu/` (MCCFR), 4-bit probabilities per node and bucket, CJK14-packed; `hu_play.hpp` rebuilds the tree and plays it. |
-| `test_bot.cpp` | Unit tests: ICM values, the HU tables against `pf.py`, the chart lookup, the heads-up tables and history mapping. |
+| `opp_model.hpp` | Real-time opponent model: situation counters and revealed-hand percentiles per opponent, shrunk estimates of ranges and frequencies. |
+| `test_bot.cpp` | Unit tests: ICM values, the HU tables against `pf.py`, the chart lookup, the heads-up tables and history mapping, the opponent model. |
 | `bot_prev.hpp` | **Frozen** copy of `bot.hpp` (namespaces `prev`, `pf_prev`) made by `arena/freeze.py`: the arena's reference. Never edit by hand. |
 
 ## Build and submit
@@ -30,6 +31,36 @@ bundled one (`tools/bundle.py` checks compilation; the output comparison was don
 
 `tools/cg_minify.py` is crossfish's minifier plus `--keep NAMES` (identifiers it must not rename:
 nested `std::chrono` names) and a few more std member names (`rfind`, `compare`, `what`, ...).
+
+## Policy (OM1: real-time opponent modelling)
+
+Why: the equilibrium tables lost to passive bots and the fixed rules cannot be right against a field
+whose members range from "raises 74% of hands and bets 98% when checked to" to "plays 17% and only
+shoves" to "limps 60%" (`analysis/tendencies.py` over 727 recorded games, counting the actions the
+referee applied: the spread between players is three times the noise within a player, and 15 hands
+predict a game's remaining preflop tendencies with correlation 0.8). The referee reveals every player's hole cards
+after every hand, folded hands too, so a bot's ranges can be measured, not inferred.
+
+What (`opp_model.hpp`, observed from the tracker's settle hook): per opponent and situation, a count and
+a sum: how often they raise or limp first in, fold to a raise, fold to a shove, bet when checked to, fold
+to a bet; and the strength percentile (`pf_rank.hpp`) of the hands they were revealed to do each with.
+Every estimate is shrunk toward the fixed assumption it replaces, with the weight of 3-4 observations.
+A range is "the top fraction f of hands", and a top-f range has mean percentile f/2, so the width behind
+an action is twice the mean revealed percentile (any-two raisers measure as uniform).
+
+Where it enters the rules:
+- beliefs: the width of an open, 3-bet, shove, limp or call comes from what this opponent showed; a
+  postflop bet's width is the old size rule scaled by how often they bet when checked to; when nobody
+  is betting, each live opponent's range is that of their last action this hand (M2.3 used uniform);
+- checked to, postflop: bet 0.6 pot if its expected value against this opponent's fold-to-bet frequency
+  and continuing range beats checking: a station gets value bets with any edge and no bluffs, a folder
+  gets bluffs once it has been seen to fold (a bluff needs a large margin until then);
+- unopened preflop: steal more from opponents who fold to raises (never less than the value threshold);
+- heads-up jam/fold at ≤ 12 BB: once an opponent has faced 3 shoves, jam by expected value against how
+  often and with what they call; once they have shown 3 shoving hands, call their shoves by pot odds
+  against that range instead of the Nash table.
+
+Arena, 2-player paired games (+0.01 is the SPRT target): @@OM_TABLE@@
 
 ## Policy (M2.3)
 

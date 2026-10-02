@@ -68,9 +68,9 @@ int main() {
     auto t1 = Clock::now();
     if (DEBUG) {
       long c = ponder_counter.load(std::memory_order_relaxed);
-      fprintf(stderr, "r%d h%d turn_ms=%.2f since_last_flush_ms=%.0f trials=%d eq=%.3f %s%s%s%s\n", o.round, o.hand_nb, ms(t0, t1),
+      fprintf(stderr, "r%d h%d turn_ms=%.2f since_last_flush_ms=%.0f trials=%d eq=%.3f %s%s%s%s %s\n", o.round, o.hand_nb, ms(t0, t1),
               ms(t_last_flush, t0), b.last_trials, b.last_equity, b.last_tag.c_str(), b.use_fast ? "" : " slow-eval",
-              b.tr.desynced ? " DESYNC:" : "", b.tr.desynced ? b.tr.last_error.c_str() : "");
+              b.tr.desynced ? " DESYNC:" : "", b.tr.desynced ? b.tr.last_error.c_str() : "", b.last_note.c_str());
       if (PONDER) fprintf(stderr, "ponder_delta=%ld\n", c - last_counter);
       last_counter = c;
     }

@@ -118,14 +118,21 @@ class Tracker : public Board {
     return true;
   }
 
-  // This hand's actions in order, for strategy lookups: who did what on which street (board size), the
-  // chips it added, the actor's whole-hand commitment and stack afterwards, and whether it left them all-in.
-  struct HandAct { int hand, street, pid, type, added, total_after, stack_after; bool allin; };
+  // This hand's actions in order, for strategy lookups and the opponent model: who did what on which street
+  // (board size), the chips it added, the actor's whole-hand commitment and stack afterwards, whether it left
+  // them all-in, and the situation before it: the amount to call, the pot, and whether a raise was pending.
+  struct HandAct { int hand, street, pid, type, added, total_after, stack_after; bool allin; int call, pot_before; bool raised; };
   std::vector<HandAct> hand_log;
+  // Called at the end of settle(), when every player's hole cards for the hand are known (the referee reveals
+  // folded hands too) and hand_log still holds the hand's actions: the opponent model's observation point.
+  struct SettleHook { virtual void on_settle(Tracker& t) = 0; virtual ~SettleHook() {} };
+  SettleHook* hook = nullptr;
 
   // Apply a shown (post-replacement) action from an action line to next_player.
   bool apply_shown(const std::string& a) {
     int pid = next_player, street = board.size(), before = pid >= 0 ? players[pid].total : 0;
+    int call_before = pid >= 0 ? call_amount(players[pid]) : 0, pot_before = pot;
+    bool raised = last_raiser != -1 && last_raiser != pid;
     ActType t; int amt = 0;
     if (a == "FOLD") t = A_FOLD;
     else if (a == "CHECK") t = A_CHECK;
@@ -138,7 +145,7 @@ class Tracker : public Board {
     if (pid >= 0) {
       if (!hand_log.empty() && hand_log.back().hand != hand_nb) hand_log.clear();
       const Player& p = players[pid];
-      hand_log.push_back({hand_nb, street, pid, (int)t, p.total - before, p.total, p.stack, p.allin});
+      hand_log.push_back({hand_nb, street, pid, (int)t, p.total - before, p.total, p.stack, p.allin, call_before, pot_before, raised});
     }
     return true;
   }
@@ -162,6 +169,7 @@ class Tracker : public Board {
     }
     if (not_folded() > 1 && board.size() == 5)
       for (int k = 0; k < 5; k++) if (board[k] < 0) return fail("showdown with unknown board card");
+    if (hook) hook->on_settle(*this);                    // every hand is known now; hand_log still holds its actions
     calculate_player_winnings();                         // sets over = true
     if (is_game_over()) game_over = true;
     return true;

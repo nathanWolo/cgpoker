@@ -18,7 +18,7 @@ from poker_sim import PokerSim, obs_to_stdin   # noqa: E402
 from replay_io import REPLAY_DIR, load_replay, recorded_actions   # noqa: E402
 import postmortem   # noqa: E402
 
-TAG_RE = re.compile(r"^r(\d+) h(\d+) .*?trials=(\S+) eq=(\S+) (\S+)")
+TAG_RE = re.compile(r"^r(\d+) h(\d+) .*?trials=(\S+) eq=(\S+) (\S+)(.*)$")
 
 
 def retrace(gid, pseudo, exe):
@@ -67,7 +67,7 @@ def retrace(gid, pseudo, exe):
     for line in open(err_path):
         m = TAG_RE.match(line)
         if m:
-            tags[int(m.group(1))] = (m.group(5), m.group(4), m.group(3))
+            tags[int(m.group(1))] = (m.group(5), m.group(4), m.group(3), m.group(6).strip())
     os.remove(err_path)
     # net chips per hand
     hs = sorted(hand_start)
@@ -76,8 +76,8 @@ def retrace(gid, pseudo, exe):
         nxt = hand_start[hs[i + 1]] if i + 1 < len(hs) else [pp.stack for pp in sim.players]
         net[h] = nxt[me] - hand_start[h][me]
     for r in recs:
-        t = tags.get(r["round"], ("?", "", ""))
-        r["tag"], r["eq"], r["trials"] = t
+        t = tags.get(r["round"], ("?", "", "", ""))
+        r["tag"], r["eq"], r["trials"], r["note"] = t
         r["net_bb"] = net.get(r["hand"], 0) / r["bb"]
         r["start_bb"] = hand_start[r["hand"]][me] / r["bb"]
         r["alive"] = sum(1 for s in hand_start[r["hand"]] if s > 0)

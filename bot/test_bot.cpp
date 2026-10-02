@@ -91,7 +91,7 @@ int main() {
     }
     bot::Bot b; static_cast<pk::Board&>(b.tr) = pk::Board(2, 1); b.tr.me = 0; b.tr.hand_nb = 7;
     b.tr.players[0].stack = 1000; b.tr.players[1].stack = 1000;
-    auto act = [&](int pid, int type, int added, int total, int stack, bool allin, int street) { b.tr.hand_log.push_back({7, street, pid, type, added, total, stack, allin}); };
+    auto act = [&](int pid, int type, int added, int total, int stack, bool allin, int street) { b.tr.hand_log.push_back({7, street, pid, type, added, total, stack, allin, 0, 0, false}); };
     // SB limps, BB raises to 30 (bb 10), SB calls, flop: BB checks, SB bets 40, BB raises all-in
     act(0, pk::A_CALL, 5, 10, 990, false, 0); act(1, pk::A_BET, 20, 30, 970, false, 0); act(0, pk::A_CALL, 20, 30, 970, false, 0);
     b.tr.board = {0, 5, 9};
@@ -133,6 +133,24 @@ int main() {
     b.tr.hand_log.clear(); act(1, pk::A_CALL, 20, 40, 3890, false, 0); act(0, pk::A_CHECK, 0, 40, 770, false, 0);
     act(0, pk::A_BET, 40, 80, 3810, false, 3); act(1, pk::A_BET, 600, 640, 3290, false, 3);
     h = b.hu_history(ok); check("hu: a big raise of our bet is all-in", ok && h == "CK/BA" ? 1 : 0, 1, 0); printf("     history: %s\n", h.c_str());
+  }
+  // the opponent model: estimates shrink from the prior toward what was revealed
+  {
+    bot::OppModel m;
+    check("om prior open width", m.open_width(1, 0.35), 0.35, 1e-9);
+    for (int i = 0; i < 12; i++) m.o[1].open_pct.add(0.5);        // raises with random hands (mean percentile 0.5)
+    check("om open width after 12 random raises", m.open_width(1, 0.35), (0.175 * 3 + 6.0) / 15 * 2, 1e-9);
+    for (int i = 0; i < 12; i++) m.o[1].vsbet.n++;                 // never folds to a bet
+    check("om fold-to-bet of a station after 12", m.fold_to_bet(1), 0.45 * 4 / 16, 1e-9);
+    for (int i = 0; i < 8; i++) { m.o[2].vsbet.n++; m.o[2].vsbet.s++; }
+    check("om fold-to-bet of a folder after 8", m.fold_to_bet(2), (0.45 * 4 + 8) / 12, 1e-9);
+    // on_settle on a synthetic hand: seat 1 raised first in with 72o (percentile ~1.0), seat 0 (me) folded
+    bot::Bot b; static_cast<pk::Board&>(b.tr) = pk::Board(2, 1); b.tr.me = 0; b.tr.hand_nb = 3; b.tr.n = 2;
+    b.tr.players[1].hand[0] = 5 * 4; b.tr.players[1].hand[1] = 0 * 4 + 1; b.tr.players[1].n_hand = 2;   // 7c 2d
+    b.tr.hand_log.clear(); b.tr.hand_log.push_back({3, 0, 1, pk::A_BET, 20, 25, 975, false, 5, 15, false});
+    b.om.on_settle(b.tr);
+    check("om observed one raise", b.om.o[1].open.n, 1, 0); check("om raise hand percentile is weak", b.om.o[1].open_pct.s > 0.9 ? 1 : 0, 1, 0);
+    check("om open width moved up", b.om.open_width(1, 0.35) > 0.35 ? 1 : 0, 1, 0);
   }
   printf("%s (%d failures)\n", fails ? "FAIL" : "PASS", fails);
   return fails ? 1 : 0;

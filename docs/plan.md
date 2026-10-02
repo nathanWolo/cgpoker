@@ -289,6 +289,18 @@ The solved heads-up strategy beats copies of M1 and a big-raise opponent, and is
 won live (ICM push/fold at 3-4 players, jam/fold heads-up); for deep and postflop heads-up play the
 abstraction has to get much richer, and robust to passive opponents, before it goes live again.
 
+**OM1 (2026-10-02): real-time opponent modelling.** A change of stance, decided on evidence: the live
+field is a zoo of stable, distinct bots (`analysis/tendencies.py`: between-player spread three times the
+within-player noise; 15 hands predict a game's remaining tendencies with correlation 0.8), the referee
+reveals every hole card after every hand, and the equilibrium tables lost to the passive members of
+that zoo. `bot/opp_model.hpp` measures each opponent's action frequencies and the revealed strength of
+the hands behind each action, shrunk toward the bot's fixed assumptions (3-4 observations' weight), and
+feeds the rules: beliefs (range widths), an expected-value bet-or-check against the opponent's fold-to-bet
+frequency, steal thresholds from fold-to-raise, and measured shove and call ranges for heads-up jam/fold
+([bot/README.md](../bot/README.md)). Arena, 2-player paired games: @@OM_TABLE@@ At all sizes:
+@@OM_MIX@@. The equilibrium pieces that won live stay (ICM push/fold at 3-4 players, jam/fold heads-up
+as the default until the opponent is measured); the solved heads-up tables stay preflop-only to 20 BB.
+
 ### M3: 3-4-player deep play (≈2 weeks)
 
 1. **Preflop charts** for N = 3, 4 by position × facing action × stack bucket (15-150 BB), for this

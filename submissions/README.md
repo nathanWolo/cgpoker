@@ -18,7 +18,9 @@ environment. Regenerate with `make bot` (`tools/bundle.py --minify`).
 | `m2_1_min.cpp` | M2.1: the heads-up tables extended to 120 BB (9 stack points, 400M iterations) and played up to 150 BB effective. `DEBUG = true`, `PONDER = false`. Arena, paired against M2: **+0.025 ± 0.006 payout per 2-player game** (8,000 paired games, SPRT pass) and +0.005 ± 0.002 over all table sizes (9,470 games; the gain is in heads-up play, which 3-4-player games reach late and short). | this commit |
 | `m2_1_bundled.cpp` | the same, readable (over the cap: submit the minified one) | commit b9b662f |
 | `m2_3_min.cpp` | M2.3: M2.1 with the raise/bet size translation against the effective stack (M2.1 called 50 BB raises off as 2.5x opens: live rank 13) and a nonlinear probability code. `DEBUG = true`, `PONDER = false`. The solved tables are used preflop only and only up to 20 BB effective: with them everywhere the bot lost 0.08 payout per 2-player game to M1 against the arena's exploitative opponents (−0.19 against passive callers); this setting is neutral against M1 on every opponent set (−0.003 ± 0.002 at all table sizes), so it is M1 plus a safe slice of M2. **Recommended for the next live run: `m1_min.cpp` again**, the strongest measured bot, which also measures how reproducible a placement run's rank is. | this commit |
-| `m2_3_bundled.cpp` | the same, readable (over the cap: submit the minified one) | this commit |
+| `m2_3_bundled.cpp` | the same, readable (over the cap: submit the minified one) | commit 65fca41 |
+| `om1_min.cpp` | OM1: M2.3 plus real-time opponent modelling (`bot/opp_model.hpp`): ranges and frequencies measured per opponent from the revealed hole cards, feeding beliefs, bet-or-check by expected value, steals and heads-up jam/fold. `DEBUG = true`, `PONDER = false`. Arena, 2-player paired games: @@OM_TABLE@@ | this commit |
+| `om1_bundled.cpp` | the same, readable (over the cap: submit the minified one) | this commit |
 
 To run the pondering probe, set `PONDER = true` near the top of `bot/main.cpp` (or in the bundled
 file: `const bool PONDER = true;`) and rebuild or paste the edited bundled file; it is under the cap

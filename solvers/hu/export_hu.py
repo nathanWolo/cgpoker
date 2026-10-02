@@ -52,13 +52,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--grid", nargs="+", default=[os.path.join(REPO, "data", "hu", "grid.bin")], help="one or more grid files; their stacks are merged and sorted")
     ap.add_argument("--out", default=os.path.join(REPO, "bot", "hu_tables.hpp"))
+    ap.add_argument("--max-stack", type=float, default=1e9, help="export only stack points up to this (BB); the bot plays the tables up to hu_max_bb")
     a = ap.parse_args()
     thr, stacks = None, []
     for path in a.grid:
         t, st = load_grid(path)
         assert thr is None or np.allclose(t, thr), "grids from different pools"
         thr = t; stacks += st
-    stacks.sort(key=lambda x: x[0])
+    stacks = sorted([x for x in stacks if x[0] <= a.max_stack], key=lambda x: x[0])
     # the tree is the same shape for every stack point except where raises collapse into all-ins at short
     # stacks, so each stack carries its own node list; the bot finds a node by (stack index, history)
     # the bot rebuilds the tree from the same rules (bot/hu_play.hpp, HuTree); a node count and an FNV-1a hash of

@@ -93,7 +93,7 @@ hu-tables:
 	g++ -std=gnu++20 -O3 -march=native -pthread -o build/hu/hu solvers/hu/hu.cpp
 	test -s data/cache/hu/pool.bin || build/hu/hu pool 2000000 1 data/cache/hu/pool.bin
 	build/hu/hu grid 8,10,12,15,20,30,40,60,120 400000000 data/hu/grid9.bin data/cache/hu/pool.bin
-	$(PYTHON) solvers/hu/export_hu.py --grid data/hu/grid9.bin
+	$(PYTHON) solvers/hu/export_hu.py --grid data/hu/grid9.bin --max-stack 20
 
 bot-test:
 	@mkdir -p build/bot

@@ -16,6 +16,7 @@
 #include "../cpp/icm.hpp"
 #include "pfn_tables.hpp"
 #include "hu_play.hpp"
+#include "opp_model.hpp"
 #include "../cpp/pe7c.hpp"
 #include "../engine/tracker.hpp"
 #include "pf_rank.hpp"
@@ -122,6 +123,8 @@ class Bot {
   long decisions = 0, trials_total = 0;
   bool use_fast = true;         // pe7c tables ready (main.cpp builds them in a background thread); else eval7_slow
   double jamfold_max_bb = 12;   // heads-up preflop: jam/fold Nash up to this effective stack (BB); the arena tunes it
+  OppModel om; bool use_om = true;       // real-time opponent model (opp_model.hpp); the arena's BOT_OM=0 disables it
+  std::string last_note;                  // the model's view of the opponent at the last decision (diagnostics)
   bool hu_postflop = false;               // heads-up tables postflop too (false: preflop only, the rules play postflop; the arena's passive opponents crush the tables' postflop play)
   double hu_shove_bb = 1e9;               // facing a preflop all-in deeper than this (BB): the rules (uniform belief) decide, not the tables
   double hu_max_bb = 20;                  // heads-up: the solved strategy (hu_play.hpp) up to this effective stack (BB); 150 lost to M1 against the exploitative field, 20 is neutral
@@ -350,6 +353,7 @@ class Bot {
   // The decision for this turn.  t0 is when the turn's input arrived.
   std::string act(const pk::Obs& o, const Budget& b, Clock::time_point t0) {
     decisions++;
+    tr.hook = use_om ? &om : nullptr;               // the model observes every settled hand
     tr.apply(o);                                     // on failure the tracker resyncs from the snapshot
     const pk::Player& me = tr.players[tr.me];
     // a clean per-turn seed (not XORed into the running state): the same situation always gets the same random stream,
@@ -402,10 +406,19 @@ class Bot {
       const pk::Player* opp = nullptr;
       for (auto& p : tr.players) if (p.id != tr.me && !p.folded) opp = &p;
       if (tr.last_raiser == -1 && tr.me == tr.sb_id && (can_raise || can_allin)) {
+        if (use_om && opp && om.o[opp->id].vsjam.n >= 3) {   // measured: jam if +EV against how often and with what they call
+          int kc = 0; for (int i = 0; i < 169; i++) kc += (pf::PF_CALL[i] >> k & 1) * ((i / 13 == i % 13) ? 6 : (i / 13 > i % 13) ? 4 : 12);
+          double nash_call = kc / 1326.0, c = 1 - om.fold_to_jam(opp->id, 1 - nash_call), wc = om.calljam_width(opp->id, nash_call);
+          static thread_local int rc[1326][2]; int kk = top_range(hole, board, 0, wc, rc);
+          double ec = equity_vs_range(hole, board, 0, 1, rc, kk, b, t0);
+          double ev = (1 - c) * 1.5 + c * (ec * (eff_bb + 0.5) - (1 - ec) * (eff_bb - 0.5));   // BB, relative to folding
+          last_tag = "pf-sb-om"; last_equity = ec; last_trials = 0;
+          return ev > 0 ? "ALL-IN" : "FOLD";
+        }
         last_tag = "pf-sb"; last_equity = -1; last_trials = 0;
         return (pf::PF_JAM[cls] >> k & 1) ? "ALL-IN" : "FOLD";
       }
-      if (tr.me == tr.bb_id && opp && opp->allin && call > 0) {
+      if (tr.me == tr.bb_id && opp && opp->allin && call > 0 && !(use_om && om.o[opp->id].jam_pct.n >= 3)) {   // measured: the pot-odds rule against their shown jam range
         last_tag = "pf-bb"; last_equity = -1; last_trials = 0;
         return (pf::PF_CALL[cls] >> k & 1) ? call_s() : "FOLD";
       }
@@ -475,24 +488,58 @@ class Bot {
       }
     }
 
-    // ---- the opponent's range: whoever bet last is assumed to hold a strong hand
+    // ---- the opponent's range: whoever bet last is assumed to hold a strong hand.  With the opponent model
+    // (opp_model.hpp) the fixed assumption is only the prior: the width comes from the hands this opponent has
+    // been revealed to take that action with, and when nobody is betting, from their last action this hand.
+    auto nash_width = [&](const unsigned short* tab, double depth_bb) {
+      int k = pf::PF_NS - 1;
+      for (int i = 0; i < pf::PF_NS; i++) if (pf::PF_STACKS[i] >= depth_bb) { k = i; break; }
+      int cnt = 0; for (int c = 0; c < 169; c++) cnt += (tab[c] >> k & 1) * ((c / 13 == c % 13) ? 6 : (c / 13 > c % 13) ? 4 : 12);
+      return std::max(0.15, cnt / 1326.0);
+    };
+    // the width of opponent p's range after their last action this hand (1 = uniform)
+    auto om_range = [&](int p) -> double {
+      double w = 1.0; bool raised_before = false;
+      for (const auto& a : tr.hand_log) {
+        if (a.hand != tr.hand_nb) continue;
+        if (a.pid != p) { if (a.street == 0 && (a.type == pk::A_BET || a.type == pk::A_ALL_IN)) raised_before = true; continue; }
+        bool allin = a.type == pk::A_ALL_IN || (a.type == pk::A_BET && a.allin);
+        if (a.street == 0) {
+          if (allin) w = om.jam_width(p, nash_width(pf::PF_JAM, std::min(25.0, (double)a.total_after / bb)));
+          else if (a.type == pk::A_BET) w = a.raised ? om.threebet_width(p, 0.2) : om.open_width(p, 0.35);
+          else if (a.type == pk::A_CALL && a.raised) w = std::min(w, om.call_width(p, 0.6));
+          else if (a.type == pk::A_CALL && !raised_before) w = om.limp_width(p, 0.8);
+        } else if (a.type == pk::A_BET || a.type == pk::A_ALL_IN) {
+          double rel = (double)a.added / std::max(1, a.pot_before);
+          double base = std::min(0.65, std::max(0.3, 0.65 - 0.35 * std::min(1.0, rel)));
+          w = std::min(w, std::min(1.0, std::max(0.15, base * om.bet_freq(p) / 0.4)));
+        }
+      }
+      return w;
+    };
     double frac = 1.0;                                    // 1 = uniform random
     if (call > 0 && tr.last_raiser >= 0 && tr.last_raiser != tr.me) {
+      int agg = tr.last_raiser;
       double bet_bb = (double)std::max(aggressor_total, max_other_total) / bb;
       if (preflop) {
-        bool shove = tr.players[tr.last_raiser].allin || bet_bb >= 12;
-        if (shove && bet_bb <= pf::PF_STACKS[pf::PF_NS - 1]) {   // a shove at a depth where we shove too: the Nash jam width there
-          int k = pf::PF_NS - 1;
-          for (int i = 0; i < pf::PF_NS; i++) if (pf::PF_STACKS[i] >= bet_bb) { k = i; break; }
-          int cnt = 0; for (int c = 0; c < 169; c++) cnt += (pf::PF_JAM[c] >> k & 1) * ((c / 13 == c % 13) ? 6 : (c / 13 > c % 13) ? 4 : 12);
-          frac = std::max(0.15, cnt / 1326.0);
-        } else if (shove) frac = 1.0;                     // deeper shoves are off our tree: the uniform (epsilon-floor) belief
+        bool shove = tr.players[agg].allin || bet_bb >= 12;
+        if (shove && bet_bb <= pf::PF_STACKS[pf::PF_NS - 1]) frac = nash_width(pf::PF_JAM, bet_bb);   // a shove at a depth where we shove too
+        else if (shove) frac = 1.0;                       // deeper shoves are off our tree: the uniform (epsilon-floor) belief
         else frac = tr.raise_nb >= 3 ? 0.2 : 0.35;        // open / 3-bet
+        if (use_om) frac = shove ? om.jam_width(agg, frac) : tr.raise_nb >= 3 ? om.threebet_width(agg, frac) : om.open_width(agg, frac);
       } else {
         double rel = (double)call / std::max(1, pot - call);
         frac = std::min(0.65, std::max(0.3, 0.65 - 0.35 * std::min(1.0, rel)));
+        if (use_om) frac = std::min(1.0, std::max(0.15, frac * om.bet_freq(agg) / 0.4));
       }
+    } else if (use_om) {                                  // nobody is betting: what the live opponents showed this hand
+      double sw = 0; int nw = 0;
+      for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) { sw += om_range(p.id); nw++; }
+      if (nw) frac = sw / nw;
     }
+    int om_opp = -1;                                      // the single live opponent (heads-up decisions)
+    for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) om_opp = om_opp < 0 ? p.id : -2;
+    if (use_om && om_opp >= 0) last_note = om.note(om_opp); else last_note.clear();
     static thread_local int range[1326][2];
     double e;
     if (frac < 1.0) {
@@ -533,6 +580,11 @@ class Bot {
       }
       if (preflop && tr.last_raiser == -1) {              // unopened pot, we are not the BB: open or complete
         double thr = 0.50 + 0.03 * (n_opp - 1);
+        if (use_om) {                                     // steal more from opponents who fold to raises, less from those who never do
+          double f = 0; int nf = 0;
+          for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) { f += om.fold_to_raise(p.id); nf++; }
+          if (nf) thr = std::max(0.40, thr - 0.25 * std::max(0.0, f / nf - 0.5));   // never above the value threshold: a station is raised for value
+        }
         if (e > thr && can_raise) { last_tag = "open"; return bet((int)(2.5 * bb) - me.rnd); }
         last_tag = "complete";
         return e > odds + 0.03 ? "CALL" : "FOLD";
@@ -541,7 +593,25 @@ class Bot {
       last_tag = "call";
       return e > odds + 0.02 ? call_s() : "FOLD";
     }
-    // ---- check is free: value-bet thinner (a checking opponent is weak)
+    // ---- check is free.  With the model, postflop: bet (0.6 pot) if its expected value against this opponent's
+    // fold-to-bet frequency and their continuing range beats checking (a station gets value bets with any edge
+    // and no bluffs; a folder gets bluffs).  Without it: value-bet thinner (a checking opponent is weak).
+    if (use_om && !preflop && can_raise) {
+      double f = 1; int nf = 0;
+      for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) { f = std::min(f, om.fold_to_bet(p.id)); nf++; }
+      if (nf) {
+        double P = pot, B = std::max((double)bb, 0.6 * pot); if (B >= stack) B = stack;
+        double frac_c = std::max(0.05, frac * (1 - f)), ec = e;
+        if (frac_c < 1.0) { int kk = top_range(hole, board, n_board, frac_c, range); ec = equity_vs_range(hole, board, n_board, n_opp, range, kk, b, t0); }
+        double ev_bet = f * P + (1 - f) * (ec * (P + 2 * B) - B), ev_check = e * P;
+        // value bets need a small edge; a bluff (betting a hand that is behind) needs a large one until this
+        // opponent has been seen to fold enough times
+        double nev = 0; for (auto& p : tr.players) if (p.id != tr.me && !p.folded && p.stack + p.total > 0) nev += om.o[p.id].vsbet.n;
+        double margin = (e >= 0.5 ? 0.03 : 0.05 + 0.25 * om.k_freq / (om.k_freq + nev)) * P;
+        last_tag = ev_bet > ev_check + margin ? (e < 0.4 ? "bluff" : "bet") : "check";
+        return last_tag == "check" ? "CHECK" : bet((int)B);
+      }
+    }
     double thr = 0.55 + 0.04 * (n_opp - 1);
     if (preflop && tr.me == tr.bb_id && tr.last_raiser == -1) thr = 0.55 + 0.03 * (n_opp - 1);   // BB option
     if (e > thr && can_raise) { last_tag = "bet"; return bet(std::max(bb, (int)(0.6 * pot))); }

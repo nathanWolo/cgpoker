@@ -49,8 +49,9 @@ def analyse(path):
             mx = max(p.total for p in sim.players); call = mx - me.total
             street = len(sim.board)
             raised = sim.last_raiser != -1 and sim.last_raiser != pid
-            tok = out.split(";")[0].strip().upper()               # the referee accepts "BET_20", "BET 20", "ALL_IN", comments after ';'
-            a = "ALL-IN" if tok.startswith("ALL") else "BET" if tok.startswith("BET") else tok.split()[0] if tok else "FOLD"
+            t, amt, err = PokerSim.parse(out.split(";")[0])       # the action the referee applies, after replacement (a CHECK facing a bet is a FOLD)
+            t2, _ = sim.replace(t, amt)
+            a = {"ALL_IN": "ALL-IN"}.get(t2, t2)
             recs.append((pid, obs.hand_nb, street, call > 0, raised, a))
             return out
         return agent

@@ -1,4 +1,4 @@
-# How the bot works, end to end (M2, 2026-10-01)
+# How the bot works, end to end (OM1, 2026-10-02)
 
 One turn, from stdin to stdout, with the parts that make it work. File references are to this
 repository; the numbers are the ones measured in [`bot/README.md`](../bot/README.md),
@@ -69,12 +69,19 @@ opponents' hands, evaluates everyone, and scores 1 / (1 + ties) if we are best.
 
 ## 5. Beliefs: what do they hold?
 
+Since OM1 the table below gives only the *priors*. `bot/opp_model.hpp` watches every opponent: how
+often they raise, limp, fold to raises, bet when checked to, fold to bets, and, because the referee
+reveals all hole cards after every hand, the strength of the hands they did each of those with. Each
+belief is the prior shrunk toward what the opponent showed, with the weight of 3-4 observations: after
+two hands little changes, after fifteen the measured opponent dominates. A bot that raises any two
+measures as a uniform range; one that has never folded to a bet gets value bets and no bluffs.
+
 This is the part that changed most after the first live games, and where the equilibrium-first,
 no-opponent-modelling stance ([`plan.md`](plan.md) §0) shows. The bot never remembers anything
 about a specific opponent. It asks what an action *means*, assuming the opponent plays roughly as
 we would:
 
-| situation | assumed holding |
+| situation | assumed holding (the prior) |
 |---|---|
 | nobody has bet (checked to us, or we are first in) | uniform random |
 | a preflop open / a 3-bet | the top 35% / 20% of starting hands, ranked by `bot/pf_rank.hpp` (equity against a random hand) |
