@@ -26,6 +26,7 @@ profiles of live arena bots, so anyone in the arena can read them.
 |---|---|
 | [`engine/`](engine/README.md) | C++ port of the referee (`pk::Engine`), the rules alone (`pk::Board`) and the bot's state tracker (`pk::Tracker`); differential checks against `sim/` and the replays |
 | [`bot/`](bot/README.md) | The bot: `bot.hpp` (tracker + Monte Carlo equity + policy), `main.cpp` (CodinGame I/O and platform probes), jam/fold tables, the frozen `bot_prev.hpp` |
+| [`play/`](play/README.md) | **Play against the bot** in your browser: `python3 play/server.py --open` (needs Python 3 and g++/clang++) |
 | [`arena/`](arena/README.md) | Local arena on the engine: dev vs prev and scripted opponents, duplicate seeds, paired SPRT; `freeze.py` |
 | [`sim/`](sim/README.md) | Python port of the referee (`poker_sim.py`, SHA1PRNG-exact deck), replay validation, decision reconstruction |
 | [`replayer/`](replayer/README.md) | Java driver over the referee's own model classes (compiled from the submodule), per-decision event logs, `PreEq.java` |
